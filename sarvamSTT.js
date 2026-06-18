@@ -29,7 +29,7 @@ class SarvamSTT {
       if (this.destroyed) return reject(new Error("Instance destroyed"));
 
       const params = new URLSearchParams({
-        model: "saaras:v2",
+        model: "saaras:v3",
         mode: "transcribe",
         language_code: this.language,
         sample_rate: "8000",
