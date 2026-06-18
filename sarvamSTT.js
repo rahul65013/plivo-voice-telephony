@@ -206,7 +206,7 @@ class SarvamSTT {
       logger.info(`[${this.callUUID}] Connecting Sarvam SDK stream...`);
 
       // 🔥 SDK handles WS internally
-      this.stream = await this.client.speechToText.streaming.connect({
+      this.stream = await this.client.speech_to_text_streaming.connect({
         model: "saaras:v3",
         mode: "transcribe",
         language_code: this.language,
