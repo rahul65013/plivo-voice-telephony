@@ -1,21 +1,3 @@
-/**
- * server.js — Main entry point
- *
- * Runs HTTP and WebSocket on the SAME port (8080).
- * Nginx (on EC2) terminates SSL and reverse-proxies to this port.
- *
- * Routes:
- *   GET  /health  → 200 OK  (Nginx / monitoring health check)
- *   GET  /answer  → Plivo XML  (called when callee picks up)
- *   POST /hangup  → 200 OK  (called when call ends)
- *   WS   /stream  → Plivo audio stream  (persistent per call)
- */
-
-/**
- * server.js — Main entry point with FULL DEBUG LOGGING
- * Every step logs so you can see exactly where the pipeline breaks
- */
-
 require("dotenv").config();
 
 const http = require("http");
@@ -25,7 +7,6 @@ const plivo = require("plivo");
 const CallSession = require("./callSession");
 const logger = require("./logger");
 
-// ── Validate required env vars on startup ─────────────────────────────────────
 const REQUIRED = [
   "PLIVO_AUTH_ID",
   "PLIVO_AUTH_TOKEN",
@@ -34,59 +15,80 @@ const REQUIRED = [
   "SERVER_BASE_URL",
   "BACKEND_API_URL",
 ];
+
 const missing = REQUIRED.filter((k) => !process.env[k]);
 if (missing.length) {
-  logger.error(`Missing required env vars: ${missing.join(", ")}`);
+  logger.error(`[BOOT] Missing env vars: ${missing.join(", ")}`);
   process.exit(1);
 }
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const BASE_URL = process.env.SERVER_BASE_URL.replace(/\/$/, "");
-const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
 const LANGUAGE = process.env.SARVAM_LANGUAGE || "en-IN";
 
 const WS_STREAM_URL =
   BASE_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://") +
   "/stream";
 
-// ── Express app ────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+/* ───────────────────────── HEALTH ───────────────────────── */
 app.get("/health", (req, res) => {
+  logger.info(`[HTTP] /health hit`);
   res.json({ status: "ok", uptime: process.uptime().toFixed(0) + "s" });
 });
 
+/* ───────────────────────── ANSWER ───────────────────────── */
 app.get("/answer", (req, res) => {
   const callUUID = req.query.CallUUID || "unknown";
-  logger.info(`[HTTP] /answer — CallUUID: ${callUUID}`);
+
+  logger.info(`\n================ CALL START ================`);
+  logger.info(`[ANSWER] CallUUID: ${callUUID}`);
+  logger.info(`[ANSWER] WS Stream: ${WS_STREAM_URL}`);
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Stream streamingUrl="${WS_STREAM_URL}" audioTrack="inbound" bidirectional="false" keepCallAlive="true"/>
+
+  <Speak>
+    Hello! I am your AI assistant. Please speak after the tone.
+  </Speak>
+
+  <Stream
+    bidirectional="false"
+    keepCallAlive="true"
+    contentType="audio/x-mulaw;rate=8000">
+    ${WS_STREAM_URL}
+  </Stream>
+
 </Response>`;
 
-  logger.info(`[HTTP] Sending XML:\n${xml}`);
+  logger.info(`[ANSWER] XML sent to Plivo:\n${xml}`);
+
   res.set("Content-Type", "text/xml");
   res.send(xml);
 });
 
-app.post("/hangup", (req, res) => {
-  logger.info(
-    `[HTTP] /hangup — CallUUID: ${req.body.CallUUID} | Cause: ${req.body.HangupCause}`,
-  );
-  res.sendStatus(200);
-});
-
+/* ───────────────────────── MAKE CALL ───────────────────────── */
 app.post("/make-call", async (req, res) => {
   const { toNumber } = req.body;
-  if (!toNumber) return res.status(400).json({ error: "toNumber is required" });
+
+  logger.info(`[MAKE_CALL] Request received → ${toNumber}`);
+
+  if (!toNumber) {
+    logger.warn(`[MAKE_CALL] Missing toNumber`);
+    return res.status(400).json({ error: "toNumber required" });
+  }
+
   try {
     const client = new plivo.Client(
       process.env.PLIVO_AUTH_ID,
       process.env.PLIVO_AUTH_TOKEN,
     );
+
+    logger.info(`[MAKE_CALL] Dialing → ${toNumber}`);
+
     const result = await client.calls.create(
       process.env.PLIVO_FROM_NUMBER,
       toNumber,
@@ -95,121 +97,77 @@ app.post("/make-call", async (req, res) => {
         answerMethod: "GET",
         hangupUrl: `${BASE_URL}/hangup`,
         hangupMethod: "POST",
-        callTimeout: "60",
-        // Pass stream URL directly in the call — works on all plans
-        streamUrl: WS_STREAM_URL,
-        streamTimeout: "86400",
-        streamTrack: "inbound_track",
       },
     );
-    logger.info(
-      `[HTTP] Call initiated to ${toNumber} — requestUuid: ${result.requestUuid}`,
-    );
-    res.json({ success: true, requestUuid: result.requestUuid });
+
+    logger.info(`[MAKE_CALL] Success → requestUuid: ${result.requestUuid}`);
+    res.json(result);
   } catch (err) {
-    logger.error(`[HTTP] make-call failed: ${err.message}`);
+    logger.error(`[MAKE_CALL] ERROR: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── HTTP + WebSocket server ────────────────────────────────────────────────────
+/* ───────────────────────── WS ───────────────────────── */
 const httpServer = http.createServer(app);
 const wss = new WebSocket.Server({ server: httpServer, path: "/stream" });
+
 const sessions = new Map();
 
 wss.on("connection", (ws, req) => {
-  logger.info(`\n${"=".repeat(60)}`);
-  logger.info(`[WS] ✅ PLIVO CONNECTED — from IP: ${req.socket.remoteAddress}`);
-  logger.info(`[WS] This means Plivo opened the WebSocket successfully`);
-  logger.info(`${"=".repeat(60)}`);
+  logger.info(`\n=============== WS CONNECTED ===============`);
+  logger.info(`[WS] Remote IP: ${req.socket.remoteAddress}`);
 
   let session = null;
-  let chunkCount = 0; // track chunks at server level for debug
+  let chunkCount = 0;
 
   ws.on("message", async (raw) => {
     let msg;
+
     try {
       msg = JSON.parse(raw.toString());
     } catch {
-      logger.warn(`[WS] Received non-JSON frame — ignoring`);
+      logger.warn(`[WS] Non-JSON frame ignored`);
       return;
     }
 
-    // ── Log EVERY event type so we know what Plivo is sending ────────────────
-    if (msg.event !== "media") {
-      // Don't log every media chunk — too noisy. Log everything else.
-      logger.info(`[WS] Event received: "${msg.event}"`);
-    }
+    logger.info(`[WS EVENT] ${msg.event}`);
 
     switch (msg.event) {
-      case "connected": {
-        // Plivo sends this immediately on WebSocket open
-        logger.info(
-          `[WS] Plivo handshake complete — protocol: ${msg.protocol}`,
-        );
-        break;
-      }
-
       case "start": {
         const callUUID = msg.start?.callId || `call-${Date.now()}`;
-        const fmt = msg.start?.mediaFormat || {};
-        logger.info(`[WS] CALL STARTED — ${callUUID}`);
+
+        logger.info(`\n[WS START] CallUUID: ${callUUID}`);
         logger.info(
-          `[WS] encoding: ${fmt.encoding} | sampleRate: ${fmt.sampleRate}`,
+          `[WS START] Format: ${JSON.stringify(msg.start?.mediaFormat)}`,
         );
 
         session = new CallSession({
           callUUID,
-          sarvamApiKey: SARVAM_API_KEY,
+          sarvamApiKey: process.env.SARVAM_API_KEY,
           language: LANGUAGE,
         });
+
         sessions.set(callUUID, session);
 
-        // Start STT first
-        session
-          .start()
-          .catch((err) =>
-            logger.error(`[WS] Session start failed: ${err.message}`),
-          );
+        await session.start();
 
-        // Play greeting immediately after stream opens
-        // Small delay to let STT connect first
-        setTimeout(() => {
-          session
-            .playGreeting()
-            .catch((err) =>
-              logger.error(`[WS] Greeting failed: ${err.message}`),
-            );
-        }, 1000);
+        logger.info(`[WS START] Session initialized`);
 
         break;
       }
 
       case "media": {
-        if (!session) {
-          logger.warn(`[WS] Got media chunk but no session — ignoring`);
-          return;
-        }
+        if (!session) return;
 
         chunkCount++;
 
-        // Log every 50th chunk so you can see audio IS flowing
-        // without flooding logs
-        if (chunkCount % 50 === 0) {
-          logger.info(
-            `[WS] Audio flowing — chunk #${chunkCount} received from Plivo`,
-          );
+        if (chunkCount === 1) {
+          logger.info(`[WS MEDIA] First chunk received`);
         }
 
-        // Log the very first chunk specially
-        if (chunkCount === 1) {
-          logger.info(
-            `[WS] ✅ First audio chunk received! Audio is flowing from Plivo`,
-          );
-          logger.info(
-            `[WS]    payload length: ${msg.media?.payload?.length} chars (base64)`,
-          );
-          logger.info(`[WS]    timestamp: ${msg.media?.timestamp}ms`);
+        if (chunkCount % 100 === 0) {
+          logger.info(`[WS MEDIA] Chunk count: ${chunkCount}`);
         }
 
         session.handleAudioChunk(msg.media?.payload);
@@ -218,75 +176,44 @@ wss.on("connection", (ws, req) => {
 
       case "stop": {
         const callUUID = msg.stop?.callId;
-        logger.info(`\n[WS] CALL STREAM STOPPED — callUUID: ${callUUID}`);
-        logger.info(`[WS] Total audio chunks received: ${chunkCount}`);
+
+        logger.info(`\n[WS STOP] Call ended → ${callUUID}`);
+        logger.info(`[WS STOP] Total chunks: ${chunkCount}`);
 
         if (session) {
-          await session.end().catch(() => {});
+          await session.end();
           sessions.delete(callUUID);
           session = null;
-          chunkCount = 0;
         }
+
+        chunkCount = 0;
         break;
       }
 
       default:
-        logger.info(
-          `[WS] Unknown event: ${msg.event} — full msg: ${JSON.stringify(msg)}`,
-        );
+        logger.warn(`[WS] Unknown event: ${msg.event}`);
     }
   });
 
-  ws.on("close", (code, reason) => {
-    logger.info(
-      `[WS] Plivo WebSocket closed — code: ${code} reason: ${reason?.toString()}`,
-    );
-    logger.info(`[WS] Total chunks before close: ${chunkCount}`);
-    if (session) {
-      session.end().catch(() => {});
-      session = null;
-    }
+  ws.on("close", () => {
+    logger.info(`[WS CLOSED] Connection closed`);
+    if (session) session.end();
   });
 
   ws.on("error", (err) => {
-    logger.error(`[WS] ❌ WebSocket error: ${err.message}`);
+    logger.error(`[WS ERROR] ${err.message}`);
   });
 });
 
-// ── Start ──────────────────────────────────────────────────────────────────────
 httpServer.listen(PORT, "0.0.0.0", () => {
-  logger.info(`╔═══════════════════════════════════════════════╗`);
-  logger.info(`║   Plivo + Sarvam AI — DEBUG MODE              ║`);
-  logger.info(`╚═══════════════════════════════════════════════╝`);
-  logger.info(`  Port        : ${PORT}`);
-  logger.info(`  Health      : ${BASE_URL}/health`);
-  logger.info(`  Answer URL  : ${BASE_URL}/answer`);
-  logger.info(`  Stream URL  : ${WS_STREAM_URL}`);
-  logger.info(`  Language    : ${LANGUAGE}`);
-  logger.info(
-    `  Sarvam key  : ${SARVAM_API_KEY ? SARVAM_API_KEY.slice(0, 6) + "..." : "❌ MISSING"}`,
-  );
-  logger.info(`  Backend URL : ${process.env.BACKEND_API_URL}`);
+  logger.info(`\n🚀 SERVER STARTED`);
+  logger.info(`Port: ${PORT}`);
+  logger.info(`Answer: ${BASE_URL}/answer`);
+  logger.info(`Stream: ${WS_STREAM_URL}`);
 });
 
-// ── Graceful shutdown ──────────────────────────────────────────────────────────
-const shutdown = async (signal) => {
-  logger.info(`[Main] ${signal} received — shutting down`);
-  for (const [callUUID, session] of sessions.entries()) {
-    await session.end().catch(() => {});
-  }
-  sessions.clear();
-  httpServer.close(() => {
-    logger.info("[Main] Closed");
-    process.exit(0);
-  });
-  setTimeout(() => process.exit(1), 10_000);
-};
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("uncaughtException", (err) =>
-  logger.error(`Uncaught: ${err.message}`),
-);
-process.on("unhandledRejection", (reason) =>
-  logger.error(`Unhandled: ${reason}`),
-);
+/* ───────────────────────── SHUTDOWN ───────────────────────── */
+process.on("SIGINT", () => {
+  logger.info(`[SYSTEM] SIGINT received`);
+  process.exit(0);
+});
