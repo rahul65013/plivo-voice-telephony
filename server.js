@@ -64,7 +64,7 @@ app.post("/answer", (req, res) => {
   <Stream
     bidirectional="true"
     keepCallAlive="true"
-    contentType="audio/x-mulaw;rate=8000"
+    contentType="audio/x-l16;rate=8000"
     audioTrack="inbound">
     ${WS_STREAM_URL}
   </Stream>
