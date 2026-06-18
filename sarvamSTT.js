@@ -194,74 +194,64 @@ class SarvamSTT {
     this.onVAD = onVAD;
     this.onError = onError;
 
-    this.socket = null;
+    this.stream = null;
     this.ready = false;
-    this.bufferQueue = [];
+    this.queue = [];
   }
 
   async connect() {
-    this.socket = await this.client.speechToTextStreaming.connect({
-      model: "saaras:v3",
-      mode: "transcribe",
-      language_code: this.language,
-      sample_rate: 8000,
-      high_vad_sensitivity: true,
-      vad_signals: true,
-    });
+    try {
+      logger.info(`[${this.callUUID}] Connecting Sarvam STT...`);
 
-    this.ready = true;
+      this.stream = await this.client.speechToTextStreaming.connect({
+        model: "saaras:v3",
+        mode: "transcribe",
+        language_code: this.language,
+        sample_rate: 8000,
+        high_vad_sensitivity: true,
+        vad_signals: true,
+      });
 
-    this.socket.on("message", (msg) => {
-      try {
-        const data = JSON.parse(msg.toString());
+      this.ready = true;
 
-        if (data.type === "transcript") {
-          this.onTranscript?.(data.transcript?.trim());
+      logger.info(`[${this.callUUID}] Sarvam STT CONNECTED`);
+
+      this.stream.on("message", (msg) => {
+        logger.info(`[${this.callUUID}] Sarvam MSG: ${JSON.stringify(msg)}`);
+
+        if (msg.type === "transcript") {
+          const text = msg.transcript?.trim();
+          if (text) this.onTranscript(text);
         }
 
-        if (data.type === "speech_start") {
-          this.onVAD?.("START_SPEECH");
+        if (msg.type === "speech_start") {
+          this.onVAD("START_SPEECH");
         }
 
-        if (data.type === "speech_end") {
-          this.onVAD?.("END_SPEECH");
+        if (msg.type === "speech_end") {
+          this.onVAD("END_SPEECH");
         }
-      } catch (e) {
-        logger.warn("Non-JSON STT message");
+      });
+
+      this.stream.on("error", (err) => {
+        logger.error(`[${this.callUUID}] Sarvam error: ${err.message}`);
+        this.onError(err);
+      });
+
+      // flush queue
+      for (const chunk of this.queue) {
+        this._send(chunk);
       }
-    });
-
-    this.socket.on("error", (err) => {
-      this.onError?.(err);
-    });
-
-    await this.socket.waitForOpen();
-
-    // flush queued audio
-    for (const b of this.bufferQueue) {
-      this._send(b);
+      this.queue = [];
+    } catch (err) {
+      logger.error(`[${this.callUUID}] CONNECT FAILED: ${err.message}`);
+      this.onError(err);
     }
-
-    this.bufferQueue = [];
   }
 
-  // ✅ ONLY BUFFER INPUT
   sendAudio(pcmBuffer) {
-    if (!pcmBuffer) return;
-
-    // 🔥 HARD GUARD (fix your crash permanently)
-    if (typeof pcmBuffer === "string") {
-      throw new Error(
-        "sendAudio expects Buffer, got string (BUG FIX NEEDED UPSTREAM)",
-      );
-    }
-
-    if (!Buffer.isBuffer(pcmBuffer)) {
-      pcmBuffer = Buffer.from(pcmBuffer);
-    }
-
-    if (!this.ready) {
-      this.bufferQueue.push(pcmBuffer);
+    if (!this.ready || !this.stream) {
+      this.queue.push(pcmBuffer);
       return;
     }
 
@@ -270,41 +260,27 @@ class SarvamSTT {
 
   _send(pcmBuffer) {
     try {
-      const payload = {
-        audio: {
-          data: pcmBuffer.toString("base64"),
-          encoding: "pcm_s16le",
-          sample_rate: 8000,
-        },
-      };
-
-      // 🔥 SAFE CALL (NO ASSUMPTION ABOUT SDK TYPE)
-      if (this.socket?.send) {
-        this.socket.send(JSON.stringify(payload));
-        return;
-      }
-
-      if (this.socket?.write) {
-        this.socket.write(pcmBuffer);
-        return;
-      }
-
-      if (this.socket?.transcribe) {
-        this.socket.transcribe(payload);
-        return;
-      }
-
-      throw new Error("Sarvam stream does not support send/write/transcribe");
+      // ✅ IMPORTANT: SDK expects raw buffer
+      this.stream.sendAudio(pcmBuffer);
     } catch (err) {
-      console.error("sendAudio error:", err.message);
+      logger.error(`[${this.callUUID}] sendAudio error: ${err.message}`);
     }
   }
 
-  async disconnect() {
-    this.socket?.close?.();
-    this.socket = null;
+  flush() {
+    try {
+      this.stream?.flush?.();
+    } catch {}
+  }
+
+  disconnect() {
+    try {
+      this.stream?.close?.();
+    } catch {}
+
+    this.stream = null;
     this.ready = false;
-    this.bufferQueue = [];
+    this.queue = [];
   }
 }
 

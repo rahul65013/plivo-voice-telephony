@@ -167,6 +167,18 @@ function mulawBase64ToBuffer(base64) {
   return Buffer.from(base64, "base64");
 }
 
+function mulawBase64ToPcm16(base64) {
+  const mulaw = Buffer.from(base64, "base64");
+  const pcm = Buffer.allocUnsafe(mulaw.length * 2);
+
+  for (let i = 0; i < mulaw.length; i++) {
+    const sample = MULAW_DECODE_TABLE[mulaw[i]];
+    pcm.writeInt16LE(sample, i * 2);
+  }
+
+  return pcm;
+}
+
 class CallSession {
   constructor({ callUUID, sarvamApiKey, language, onTranscriptReady }) {
     this.callUUID = callUUID;
