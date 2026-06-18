@@ -62,11 +62,9 @@ app.get("/answer", (req, res) => {
   const callUUID = req.query.CallUUID || "unknown";
   logger.info(`[HTTP] /answer — CallUUID: ${callUUID}`);
 
-  // Just speak and wait — stream is passed via call API directly
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Speak>Hello! How can I help you today?</Speak>
-  <Wait length="7200"/>
+  <Stream streamingUrl="${WS_STREAM_URL}" audioTrack="inbound" bidirectional="false" keepCallAlive="true"/>
 </Response>`;
 
   logger.info(`[HTTP] Sending XML:\n${xml}`);
