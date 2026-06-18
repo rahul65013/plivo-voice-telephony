@@ -190,9 +190,9 @@ class SarvamSTT {
 
     this.language = language || "en-IN";
 
-    this.onTranscript = onTranscript;
-    this.onVAD = onVAD;
-    this.onError = onError;
+    this.onTranscript = onTranscript || (() => {});
+    this.onVAD = onVAD || (() => {});
+    this.onError = onError || (() => {});
 
     this.stream = null;
     this.ready = false;
@@ -200,68 +200,62 @@ class SarvamSTT {
   }
 
   async connect() {
-    try {
-      logger.info(`[${this.callUUID}] Connecting Sarvam STT...`);
+    logger.info(`[${this.callUUID}] Connecting Sarvam STT...`);
 
-      this.stream = await this.client.speechToTextStreaming.connect({
-        model: "saaras:v3",
-        mode: "transcribe",
-        language_code: this.language,
-        sample_rate: 8000,
-        high_vad_sensitivity: true,
-        vad_signals: true,
-      });
+    this.stream = await this.client.speechToTextStreaming.connect({
+      model: "saaras:v3",
+      mode: "transcribe",
+      "language-code": this.language,
+      sample_rate: 8000,
+      high_vad_sensitivity: true,
+      vad_signals: true,
+    });
 
-      this.ready = true;
+    this.ready = true;
 
-      logger.info(`[${this.callUUID}] Sarvam STT CONNECTED`);
+    logger.info(`[${this.callUUID}] Sarvam STT connected`);
 
-      this.stream.on("message", (msg) => {
-        logger.info(`[${this.callUUID}] Sarvam MSG: ${JSON.stringify(msg)}`);
+    // 🔥 IMPORTANT: correct event name is usually "message"
+    this.stream.on("message", (msg) => {
+      logger.info(`[${this.callUUID}] STT MSG:`, msg);
 
-        if (msg.type === "transcript") {
-          const text = msg.transcript?.trim();
-          if (text) this.onTranscript(text);
-        }
-
-        if (msg.type === "speech_start") {
-          this.onVAD("START_SPEECH");
-        }
-
-        if (msg.type === "speech_end") {
-          this.onVAD("END_SPEECH");
-        }
-      });
-
-      this.stream.on("error", (err) => {
-        logger.error(`[${this.callUUID}] Sarvam error: ${err.message}`);
-        this.onError(err);
-      });
-
-      // flush queue
-      for (const chunk of this.queue) {
-        this._send(chunk);
+      if (msg.type === "transcript") {
+        const text = msg.transcript?.trim();
+        if (text) this.onTranscript(text);
       }
-      this.queue = [];
-    } catch (err) {
-      logger.error(`[${this.callUUID}] CONNECT FAILED: ${err.message}`);
+
+      if (msg.type === "speech_start") {
+        this.onVAD("START_SPEECH");
+      }
+
+      if (msg.type === "speech_end") {
+        this.onVAD("END_SPEECH");
+      }
+    });
+
+    this.stream.on("error", (err) => {
+      logger.error(`[${this.callUUID}] STT error: ${err.message}`);
       this.onError(err);
-    }
+    });
+
+    // flush queued audio
+    const q = this.queue;
+    this.queue = [];
+    q.forEach((a) => this.sendAudio(a));
   }
 
-  sendAudio(pcmBuffer) {
-    if (!this.ready || !this.stream) {
-      this.queue.push(pcmBuffer);
+  sendAudio(base64Audio) {
+    if (!this.stream || !this.ready) {
+      this.queue.push(base64Audio);
       return;
     }
 
-    this._send(pcmBuffer);
-  }
-
-  _send(pcmBuffer) {
     try {
-      // ✅ IMPORTANT: SDK expects raw buffer
-      this.stream.transcribe(pcmBuffer);
+      this.stream.transcribe({
+        audio: base64Audio,
+        sample_rate: 8000,
+        encoding: "audio/x-l16",
+      });
     } catch (err) {
       logger.error(`[${this.callUUID}] sendAudio error: ${err.message}`);
     }
@@ -270,16 +264,13 @@ class SarvamSTT {
   flush() {
     try {
       this.stream?.flush?.();
-    } catch {}
+    } catch (e) {}
   }
 
   disconnect() {
-    try {
-      this.stream?.close?.();
-    } catch {}
-
-    this.stream = null;
     this.ready = false;
+    this.stream?.close?.();
+    this.stream = null;
     this.queue = [];
   }
 }

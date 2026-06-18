@@ -206,11 +206,7 @@ class CallSession {
 
   // ✅ PLIVO INPUT (base64 only)
   handleAudioChunk(base64Payload) {
-    if (!this.stt || !base64Payload) return;
-
-    const pcmBuffer = mulawBase64ToBuffer(base64Payload);
-
-    this.stt.sendAudio(pcmBuffer);
+    this.stt.sendAudio(base64Payload); // 그대로
   }
 
   _onVAD(signal) {
