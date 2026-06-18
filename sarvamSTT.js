@@ -217,13 +217,13 @@ class SarvamSTT {
         vad_signals: "true",
       });
 
-      const url = `wss://api.sarvam.ai/v1/speech-to-text/streaming?${params}`;
+      const url = `wss://api.sarvam.ai/v1/speech-to-text/ws?${params}`;
 
       logger.info(`[${this.callUUID}] Sarvam STT → ${url}`);
 
       this.ws = new WebSocket(url, {
         headers: {
-          "api-subscription-key": this.apiKey,
+          "Api-Subscription-Key": this.apiKey,
         },
       });
 
