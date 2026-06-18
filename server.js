@@ -42,29 +42,18 @@ app.get("/health", (req, res) => {
 
 /* ───────────────────────── ANSWER ───────────────────────── */
 app.get("/answer", (req, res) => {
-  const callUUID = req.query.CallUUID || "unknown";
-
-  logger.info(`\n================ CALL START ================`);
-  logger.info(`[ANSWER] CallUUID: ${callUUID}`);
-  logger.info(`[ANSWER] WS Stream: ${WS_STREAM_URL}`);
+  logger.info(`[HTTP] /answer triggered`);
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-
-  <Speak>
-    Hello! I am your AI assistant. Please speak after the tone.
-  </Speak>
-
   <Stream
     bidirectional="false"
-    keepCallAlive="true"
-    contentType="audio/x-mulaw;rate=8000">
+    keepCallAlive="true">
     ${WS_STREAM_URL}
   </Stream>
-
 </Response>`;
 
-  logger.info(`[ANSWER] XML sent to Plivo:\n${xml}`);
+  logger.info(`[HTTP] Sending STREAM ONLY XML`);
 
   res.set("Content-Type", "text/xml");
   res.send(xml);
