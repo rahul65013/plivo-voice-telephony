@@ -1,277 +1,180 @@
-// /**
-//  * sarvamSTT.js
-//  * Streams PCM16 audio to Sarvam AI and fires callbacks for transcripts + VAD.
-//  */
+/**
+ * sarvamSTT.js
+ *
+ * Connects directly to Sarvam's WebSocket STT endpoint (no SDK).
+ * Plivo sends μ-law 8kHz audio → we convert to PCM16 LE → send to Sarvam.
+ *
+ * Message types from Sarvam:
+ *   { type: "transcript",   transcript: "..." }   ← final transcript
+ *   { type: "speech_start" }                       ← VAD: user started speaking
+ *   { type: "speech_end" }                         ← VAD: user stopped speaking
+ */
 
-// const WebSocket = require("ws");
-// const logger = require("./logger");
-
-// class SarvamSTT {
-//   constructor({ callUUID, apiKey, language, onTranscript, onVAD, onError }) {
-//     this.callUUID = callUUID;
-//     this.apiKey = apiKey;
-//     this.language = language || "en-IN";
-//     this.onTranscript = onTranscript || (() => {});
-//     this.onVAD = onVAD || (() => {});
-//     this.onError = onError || ((e) => logger.error(`STT error: ${e.message}`));
-
-//     this.ws = null;
-//     this.isReady = false;
-//     this.audioQueue = [];
-//     this.reconnectCount = 0;
-//     this.MAX_RECONNECTS = 3;
-//     this.destroyed = false;
-//     this.audioSentCount = 0;
-//   }
-
-//   connect() {
-//     return new Promise((resolve, reject) => {
-//       if (this.destroyed) return reject(new Error("Instance destroyed"));
-
-//       const params = new URLSearchParams({
-//         model: "saaras:v3",
-//         mode: "transcribe",
-//         language_code: this.language,
-//         sample_rate: "8000",
-//         input_audio_codec: "pcm_s16le",
-//         high_vad_sensitivity: "true",
-//         vad_signals: "true",
-//       });
-
-//       const url = `wss://api.sarvam.ai/v1/speech-to-text/ws?${params}`;
-//       logger.info(`[${this.callUUID}] Sarvam STT → ${url}`);
-
-//       this.ws = new WebSocket(url, {
-//         headers: { "api-subscription-key": this.apiKey },
-//       });
-//       this.ws.binaryType = "nodebuffer";
-
-//       let resolved = false;
-//       const done = (err) => {
-//         if (resolved) return;
-//         resolved = true;
-//         err ? reject(err) : resolve();
-//       };
-
-//       this.ws.on("open", () => {
-//         logger.info(`[${this.callUUID}] ✅ Sarvam WS open`);
-//         this.isReady = true;
-//         this.reconnectCount = 0;
-
-//         if (this.audioQueue.length > 0) {
-//           logger.info(
-//             `[${this.callUUID}] Flushing ${this.audioQueue.length} queued chunks`,
-//           );
-//           for (const chunk of this.audioQueue) this.ws.send(chunk);
-//           this.audioQueue = [];
-//         }
-//         done();
-//       });
-
-//       this.ws.on("message", (data) => {
-//         const raw = data.toString();
-//         logger.info(`[${this.callUUID}] Sarvam ← ${raw}`);
-//         try {
-//           this._handleMessage(JSON.parse(raw));
-//         } catch {
-//           logger.warn(`[${this.callUUID}] Non-JSON from Sarvam: ${raw}`);
-//         }
-//       });
-
-//       this.ws.on("error", (err) => {
-//         logger.error(`[${this.callUUID}] Sarvam WS error: ${err.message}`);
-//         this.isReady = false;
-//         this.onError(err);
-//         done(err);
-//       });
-
-//       this.ws.on("close", (code, reason) => {
-//         const r = reason?.toString() || "";
-//         logger.warn(
-//           `[${this.callUUID}] Sarvam WS closed — code:${code} reason:"${r}" ` +
-//             `frames_sent:${this.audioSentCount}`,
-//         );
-//         this.isReady = false;
-
-//         if (
-//           !this.destroyed &&
-//           code === 1006 &&
-//           this.reconnectCount < this.MAX_RECONNECTS
-//         ) {
-//           const delay = Math.min(300 * 2 ** this.reconnectCount, 4000);
-//           this.reconnectCount++;
-//           logger.warn(
-//             `[${this.callUUID}] Reconnecting in ${delay}ms (${this.reconnectCount}/${this.MAX_RECONNECTS})`,
-//           );
-//           setTimeout(() => this.connect().catch(this.onError), delay);
-//         }
-//         // resolve on first close if we never opened (timeout scenario)
-//         done();
-//       });
-//     });
-//   }
-
-//   _handleMessage(msg) {
-//     switch (msg.type) {
-//       case "transcript": {
-//         const text = (msg.transcript || "").trim();
-//         logger.info(`[${this.callUUID}] 🎯 Transcript: "${text}"`);
-//         if (text) this.onTranscript(text);
-//         break;
-//       }
-//       case "speech_start":
-//         logger.info(`[${this.callUUID}] VAD: speech_start`);
-//         this.onVAD("START_SPEECH");
-//         break;
-//       case "speech_end":
-//         logger.info(`[${this.callUUID}] VAD: speech_end`);
-//         this.onVAD("END_SPEECH");
-//         break;
-//       default:
-//         logger.info(
-//           `[${this.callUUID}] Sarvam unknown: ${JSON.stringify(msg)}`,
-//         );
-//     }
-//   }
-
-//   sendAudio(pcmBuffer) {
-//     if (this.destroyed) return;
-
-//     if (!this.isReady || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
-//       this.audioQueue.push(pcmBuffer);
-//       if (this.audioQueue.length % 50 === 0)
-//         logger.warn(
-//           `[${this.callUUID}] STT not ready — queue: ${this.audioQueue.length}`,
-//         );
-//       return;
-//     }
-
-//     this.audioSentCount++;
-//     this.ws.send(pcmBuffer);
-
-//     if (this.audioSentCount === 1)
-//       logger.info(`[${this.callUUID}] ✅ First PCM frame → Sarvam`);
-//     if (this.audioSentCount % 200 === 0)
-//       logger.info(`[${this.callUUID}] 📡 ${this.audioSentCount} frames sent`);
-//   }
-
-//   flush() {
-//     if (this.ws?.readyState === WebSocket.OPEN) {
-//       logger.info(`[${this.callUUID}] Flushing Sarvam`);
-//       this.ws.send(JSON.stringify({ type: "flush" }));
-//     }
-//   }
-
-//   disconnect() {
-//     logger.info(`[${this.callUUID}] Disconnecting Sarvam STT`);
-//     this.destroyed = true;
-//     this.flush();
-//     if (this.ws) {
-//       this.ws.close(1000, "Call ended");
-//       this.ws = null;
-//     }
-//     this.isReady = false;
-//     this.audioQueue = [];
-//   }
-// }
-
-// module.exports = SarvamSTT;
-
-const { SarvamAIClient } = require("sarvamai");
+const WebSocket = require("ws");
 const logger = require("./logger");
 
+// Sarvam WebSocket endpoint
+const SARVAM_WS_URL = "wss://api.sarvam.ai/speech-to-text/ws";
+
+// μ-law → PCM16 decode table (built once at startup)
+const MULAW_TABLE = (() => {
+  const table = new Int16Array(256);
+  for (let i = 0; i < 256; i++) {
+    let u = ~i & 0xff;
+    const sign = u & 0x80;
+    const exp = (u >> 4) & 0x07;
+    const mant = u & 0x0f;
+    let sample = ((mant << 1) + 33) << exp;
+    sample -= 33;
+    table[i] = sign ? -sample : sample;
+  }
+  return table;
+})();
+
+function mulawBase64ToPcm16Base64(base64Input) {
+  const mulaw = Buffer.from(base64Input, "base64");
+  const pcm = Buffer.allocUnsafe(mulaw.length * 2);
+  for (let i = 0; i < mulaw.length; i++) {
+    pcm.writeInt16LE(MULAW_TABLE[mulaw[i]], i * 2);
+  }
+  return pcm.toString("base64");
+}
+
 class SarvamSTT {
+  /**
+   * @param {object} opts
+   * @param {string}   opts.callUUID
+   * @param {string}   opts.apiKey        - SARVAM_API_KEY
+   * @param {string}   [opts.language]    - BCP-47 code, default "en-IN"
+   * @param {Function} opts.onTranscript  - called with (transcriptText)
+   * @param {Function} opts.onVAD         - called with ("START_SPEECH" | "END_SPEECH")
+   * @param {Function} [opts.onError]     - called with (Error)
+   */
   constructor({ callUUID, apiKey, language, onTranscript, onVAD, onError }) {
     this.callUUID = callUUID;
-
-    this.client = new SarvamAIClient({
-      apiSubscriptionKey: apiKey,
-    });
-
+    this.apiKey = apiKey;
     this.language = language || "en-IN";
-
-    this.onTranscript = onTranscript || (() => {});
+    this.onTranscript = onTranscript;
     this.onVAD = onVAD || (() => {});
-    this.onError = onError || (() => {});
+    this.onError = onError || ((e) => logger.error(`[STT] ${e.message}`));
 
-    this.stream = null;
+    this.ws = null;
     this.ready = false;
-    this.queue = [];
+    this.audioQueue = []; // holds base64 μ-law strings queued before connect
   }
 
-  async connect() {
-    logger.info(`[${this.callUUID}] Connecting Sarvam STT...`);
+  connect() {
+    return new Promise((resolve, reject) => {
+      // Build the query string — all config goes in URL params
+      const params = new URLSearchParams({
+        "language-code": this.language,
+        model: "saaras:v3",
+        mode: "transcribe",
+        sample_rate: "8000", // Plivo gives us 8kHz
+        input_audio_codec: "pcm_s16le", // we'll convert μ-law → PCM16 before sending
+        high_vad_sensitivity: "true",
+        vad_signals: "true",
+      });
 
-    this.stream = await this.client.speechToTextStreaming.connect({
-      model: "saaras:v3",
-      mode: "transcribe",
-      "language-code": this.language,
-      sample_rate: 8000,
-      high_vad_sensitivity: true,
-      vad_signals: true,
+      const url = `${SARVAM_WS_URL}?${params.toString()}`;
+
+      logger.info(`[${this.callUUID}][STT] Connecting to Sarvam...`);
+
+      this.ws = new WebSocket(url, {
+        headers: {
+          "api-subscription-key": this.apiKey,
+        },
+      });
+
+      this.ws.on("open", () => {
+        logger.info(`[${this.callUUID}][STT] Connected ✅`);
+        this.ready = true;
+
+        // Flush anything that arrived before the socket was ready
+        for (const chunk of this.audioQueue) {
+          this._sendPcm(chunk);
+        }
+        this.audioQueue = [];
+
+        resolve();
+      });
+
+      this.ws.on("message", (raw) => {
+        let msg;
+        try {
+          msg = JSON.parse(raw.toString());
+        } catch {
+          return; // ignore non-JSON frames
+        }
+
+        logger.info(`[${this.callUUID}][STT] MSG: ${JSON.stringify(msg)}`);
+
+        if (msg.type === "transcript" && msg.transcript?.trim()) {
+          this.onTranscript(msg.transcript.trim());
+        } else if (msg.type === "speech_start") {
+          this.onVAD("START_SPEECH");
+        } else if (msg.type === "speech_end") {
+          this.onVAD("END_SPEECH");
+        }
+      });
+
+      this.ws.on("error", (err) => {
+        logger.error(`[${this.callUUID}][STT] WebSocket error: ${err.message}`);
+        this.onError(err);
+        reject(err);
+      });
+
+      this.ws.on("close", (code, reason) => {
+        logger.info(
+          `[${this.callUUID}][STT] Closed — code: ${code}, reason: ${reason}`,
+        );
+        this.ready = false;
+      });
     });
-
-    this.ready = true;
-
-    logger.info(`[${this.callUUID}] Sarvam STT connected`);
-
-    // 🔥 IMPORTANT: correct event name is usually "message"
-    this.stream.on("message", (msg) => {
-      logger.info(`[${this.callUUID}] STT MSG:`, msg);
-
-      if (msg.type === "transcript") {
-        const text = msg.transcript?.trim();
-        if (text) this.onTranscript(text);
-      }
-
-      if (msg.type === "speech_start") {
-        this.onVAD("START_SPEECH");
-      }
-
-      if (msg.type === "speech_end") {
-        this.onVAD("END_SPEECH");
-      }
-    });
-
-    this.stream.on("error", (err) => {
-      logger.error(`[${this.callUUID}] STT error: ${err.message}`);
-      this.onError(err);
-    });
-
-    // flush queued audio
-    const q = this.queue;
-    this.queue = [];
-    q.forEach((a) => this.sendAudio(a));
   }
 
-  sendAudio(base64Audio) {
-    if (!this.stream || !this.ready) {
-      this.queue.push(base64Audio);
+  /**
+   * Called per audio chunk from Plivo.
+   * @param {string} base64Mulaw - base64-encoded μ-law audio from Plivo
+   */
+  sendAudio(base64Mulaw) {
+    if (!this.ready) {
+      this.audioQueue.push(base64Mulaw);
       return;
     }
-
-    try {
-      this.stream.transcribe({
-        audio: base64Audio,
-        sample_rate: 8000,
-        encoding: "audio/x-l16",
-      });
-    } catch (err) {
-      logger.error(`[${this.callUUID}] sendAudio error: ${err.message}`);
-    }
+    this._sendPcm(base64Mulaw);
   }
 
+  _sendPcm(base64Mulaw) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    const pcm16Base64 = mulawBase64ToPcm16Base64(base64Mulaw);
+
+    const payload = JSON.stringify({
+      audio: {
+        data: pcm16Base64,
+        encoding: "pcm_s16le",
+        sample_rate: 8000,
+      },
+    });
+
+    this.ws.send(payload);
+  }
+
+  /** Flush Sarvam's buffer — forces it to emit whatever it has buffered */
   flush() {
-    try {
-      this.stream?.flush?.();
-    } catch (e) {}
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    logger.info(`[${this.callUUID}][STT] Flushing...`);
+    this.ws.send(JSON.stringify({ flush: true }));
   }
 
   disconnect() {
     this.ready = false;
-    this.stream?.close?.();
-    this.stream = null;
-    this.queue = [];
+    this.audioQueue = [];
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
   }
 }
 

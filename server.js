@@ -1,3 +1,17 @@
+/**
+ * server.js
+ *
+ * Plivo outbound call bot:
+ *   POST /make-call  → dials the number
+ *   POST /answer     → returns XML (Speak greeting + bidirectional Stream)
+ *   WS   /stream     → receives Plivo audio, pipes to Sarvam STT
+ *
+ * Flow:
+ *   call answered → greeting played → stream opens → user speaks
+ *   → Sarvam transcribes → handleTranscript() called with text
+ *   → (TODO) fetch audio URL from your API → play it back
+ */
+
 require("dotenv").config();
 
 const http = require("http");
@@ -7,6 +21,8 @@ const plivo = require("plivo");
 const CallSession = require("./callSession");
 const logger = require("./logger");
 
+// ── Env validation ───────────────────────────────────────────────────────────
+
 const REQUIRED = [
   "PLIVO_AUTH_ID",
   "PLIVO_AUTH_TOKEN",
@@ -14,7 +30,6 @@ const REQUIRED = [
   "SARVAM_API_KEY",
   "SERVER_BASE_URL",
 ];
-
 const missing = REQUIRED.filter((k) => !process.env[k]);
 if (missing.length) {
   logger.error(`[BOOT] Missing env vars: ${missing.join(", ")}`);
@@ -28,34 +43,28 @@ const GREETING_TEXT =
   process.env.GREETING_TEXT ||
   "Hello! Thank you for your time. How can I help you today?";
 
-// wss:// URL for Plivo's <Stream> element
 const WS_STREAM_URL =
   BASE_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://") +
   "/stream";
+
+// ── Express app ──────────────────────────────────────────────────────────────
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-/* ───────────────────────── HEALTH ───────────────────────── */
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", uptime: process.uptime().toFixed(0) + "s" });
-});
+app.get("/health", (_req, res) =>
+  res.json({ status: "ok", uptime: process.uptime().toFixed(0) + "s" }),
+);
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   /answer  — called by Plivo when the callee picks up.
-
-   KEY DESIGN:
-   1. <Speak> plays the greeting. Plivo waits for it to finish.
-   2. <Stream bidirectional="true"> opens the WebSocket.
-      - bidirectional="true"  →  Plivo keeps the call alive as long as the
-        WS connection is open (even with no audio being sent back).
-      - Without bidirectional the call is torn down the moment the stream
-        element "ends", which is why you saw the call drop after greetings.
-   3. The WS server sends a silent keep-alive every 5 s so Plivo never
-      times out the stream.
-──────────────────────────────────────────────────────────────────────────── */
-app.post("/answer", (req, res) => {
+/**
+ * /answer — Plivo calls this when the callee picks up.
+ *
+ * We play the greeting then open a bidirectional stream.
+ * `bidirectional="true"` keeps the call alive while the WS is open.
+ * `contentType="audio/x-l16;rate=8000"` is what Plivo sends us.
+ */
+app.all("/answer", (_req, res) => {
   logger.info(`[HTTP] /answer triggered`);
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -70,37 +79,25 @@ app.post("/answer", (req, res) => {
   </Stream>
 </Response>`;
 
-  logger.info(`[HTTP] Sending Answer XML:\n${xml}`);
-  res.set("Content-Type", "text/xml");
-  res.send(xml);
+  logger.info(`[HTTP] Sending XML:\n${xml}`);
+  res.set("Content-Type", "text/xml").send(xml);
 });
 
-// Plivo may call /answer via GET for outbound — support both
-app.get("/answer", (req, res) => {
-  req.method = "POST";
-  app._router.handle(req, res);
-});
-
-/* ───────────────────────── HANGUP ───────────────────────── */
 app.post("/hangup", (req, res) => {
-  const callUUID = req.body?.CallUUID || "unknown";
-  logger.info(`[HTTP] /hangup → CallUUID: ${callUUID}`);
+  logger.info(`[HTTP] /hangup — CallUUID: ${req.body?.CallUUID}`);
   res.sendStatus(200);
 });
 
-/* ───────────────────────── MAKE CALL ───────────────────────── */
 app.post("/make-call", async (req, res) => {
   const { toNumber } = req.body;
   if (!toNumber) return res.status(400).json({ error: "toNumber required" });
 
   logger.info(`[MAKE_CALL] Dialing → ${toNumber}`);
-
   try {
     const client = new plivo.Client(
       process.env.PLIVO_AUTH_ID,
       process.env.PLIVO_AUTH_TOKEN,
     );
-
     const result = await client.calls.create(
       process.env.PLIVO_FROM_NUMBER,
       toNumber,
@@ -111,8 +108,7 @@ app.post("/make-call", async (req, res) => {
         hangupMethod: "POST",
       },
     );
-
-    logger.info(`[MAKE_CALL] Success → requestUuid: ${result.requestUuid}`);
+    logger.info(`[MAKE_CALL] Success — requestUuid: ${result.requestUuid}`);
     res.json(result);
   } catch (err) {
     logger.error(`[MAKE_CALL] ERROR: ${err.message}`);
@@ -120,46 +116,43 @@ app.post("/make-call", async (req, res) => {
   }
 });
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   WebSocket server — /stream
-──────────────────────────────────────────────────────────────────────────── */
+// ── WebSocket server ─────────────────────────────────────────────────────────
+
 const httpServer = http.createServer(app);
 const wss = new WebSocket.Server({ server: httpServer, path: "/stream" });
 
-// Silent mulaw frame — 20 ms of silence at 8 kHz = 160 bytes of 0xFF (mulaw silence)
+// Plivo times out bidirectional streams if it hears no audio back.
+// Send 20ms of μ-law silence every 5s to keep the stream alive.
 const MULAW_SILENCE_20MS = Buffer.alloc(160, 0xff);
 
 wss.on("connection", (ws, req) => {
-  logger.info(`\n=============== WS CONNECTED ===============`);
-  logger.info(`[WS] IP: ${req.socket.remoteAddress}`);
+  logger.info(`[WS] New connection from ${req.socket.remoteAddress}`);
 
   let session = null;
-  let chunkCount = 0;
   let streamSid = null;
+  let chunkCount = 0;
   let keepAliveTimer = null;
 
-  /* ── Keep-alive: send silent audio every 5 s so Plivo never times out ── */
   function startKeepAlive() {
     keepAliveTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN && streamSid) {
-        const silenceMsg = JSON.stringify({
-          event: "playAudio",
-          media: {
-            contentType: "audio/x-mulaw;rate=8000",
-            sampleRate: 8000,
-            payload: MULAW_SILENCE_20MS.toString("base64"),
-          },
-        });
-        ws.send(silenceMsg);
+        ws.send(
+          JSON.stringify({
+            event: "playAudio",
+            media: {
+              contentType: "audio/x-mulaw;rate=8000",
+              sampleRate: 8000,
+              payload: MULAW_SILENCE_20MS.toString("base64"),
+            },
+          }),
+        );
       }
     }, 5000);
   }
 
   function stopKeepAlive() {
-    if (keepAliveTimer) {
-      clearInterval(keepAliveTimer);
-      keepAliveTimer = null;
-    }
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
   }
 
   ws.on("message", async (raw) => {
@@ -167,57 +160,52 @@ wss.on("connection", (ws, req) => {
     try {
       msg = JSON.parse(raw.toString());
     } catch {
-      logger.warn(`[WS] Non-JSON frame ignored`);
-      return;
+      return; // ignore non-JSON frames
     }
 
     switch (msg.event) {
-      /* ── start ────────────────────────────────────────────────────── */
+      // ── Stream opened ─────────────────────────────────────────────────────
       case "start": {
         streamSid =
           msg.start?.streamSid || msg.start?.callId || `call-${Date.now()}`;
         const callUUID = msg.start?.callId || streamSid;
 
-        logger.info(`\n[WS START] streamSid: ${streamSid}`);
-        logger.info(`[WS START] callUUID:  ${callUUID}`);
         logger.info(
-          `[WS START] Format:    ${JSON.stringify(msg.start?.mediaFormat)}`,
+          `[WS] START — streamSid: ${streamSid}, callUUID: ${callUUID}`,
+        );
+        logger.info(
+          `[WS] Media format: ${JSON.stringify(msg.start?.mediaFormat)}`,
         );
 
         session = new CallSession({
           callUUID,
           sarvamApiKey: process.env.SARVAM_API_KEY,
           language: LANGUAGE,
-          onTranscriptReady: async (transcript) => {
-            // ── This is where you call your external API with the transcript ──
-            logger.info(`\n[TRANSCRIPT READY] "${transcript}"`);
-            await handleTranscript(transcript, callUUID);
-          },
+          onTranscriptReady: (transcript) =>
+            handleTranscript(transcript, callUUID),
         });
 
         await session.start();
         startKeepAlive();
-
-        logger.info(`[WS START] Session initialized ✅`);
+        logger.info(`[WS] Session ready ✅`);
         break;
       }
 
-      /* ── media ────────────────────────────────────────────────────── */
+      // ── Incoming audio ────────────────────────────────────────────────────
       case "media": {
-        if (!session) return;
+        if (!session || !msg.media?.payload) return;
         chunkCount++;
-        if (chunkCount === 1)
-          logger.info(`[WS MEDIA] First audio chunk received`);
-        if (chunkCount % 200 === 0)
-          logger.info(`[WS MEDIA] Chunks: ${chunkCount}`);
+        if (chunkCount === 1) logger.info(`[WS] First audio chunk received`);
+        if (chunkCount % 500 === 0)
+          logger.info(`[WS] Chunks so far: ${chunkCount}`);
 
-        session.handleAudioChunk(msg.media?.payload);
+        session.handleAudioChunk(msg.media.payload);
         break;
       }
 
-      /* ── stop ─────────────────────────────────────────────────────── */
+      // ── Call ended ────────────────────────────────────────────────────────
       case "stop": {
-        logger.info(`\n[WS STOP] Call ended. Total chunks: ${chunkCount}`);
+        logger.info(`[WS] STOP — total chunks: ${chunkCount}`);
         stopKeepAlive();
         if (session) {
           await session.end();
@@ -235,42 +223,38 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => {
     logger.info(`[WS] Connection closed`);
     stopKeepAlive();
-    if (session) {
-      session.end().catch(() => {});
-      session = null;
-    }
+    session?.end().catch(() => {});
+    session = null;
   });
 
   ws.on("error", (err) => {
-    logger.error(`[WS ERROR] ${err.message}`);
+    logger.error(`[WS] Error: ${err.message}`);
     stopKeepAlive();
   });
 });
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   handleTranscript — replace with your actual API call logic
-──────────────────────────────────────────────────────────────────────────── */
-async function handleTranscript(transcript, callUUID) {
-  try {
-    logger.info(`[TRANSCRIPT_HANDLER] CallUUID: ${callUUID}`);
-    logger.info(`[TRANSCRIPT_HANDLER] Transcript: "${transcript}"`);
+// ── Transcript handler — wire your backend API here ─────────────────────────
 
-    // TODO: replace this with your actual API call
-    // Example:
-    // const response = await fetch(process.env.BACKEND_API_URL, {
-    //   method: "POST",
-    //   headers: { "Content-Type": "application/json" },
-    //   body: JSON.stringify({ transcript, callUUID }),
-    // });
-    // const { audioUrl } = await response.json();
-    // logger.info(`[TRANSCRIPT_HANDLER] Got audio URL: ${audioUrl}`);
-    // Then you can stream that audio back via the WS if needed
-  } catch (err) {
-    logger.error(`[TRANSCRIPT_HANDLER] Error: ${err.message}`);
-  }
+async function handleTranscript(transcript, callUUID) {
+  logger.info(`\n${"=".repeat(60)}`);
+  logger.info(`[TRANSCRIPT] CallUUID : ${callUUID}`);
+  logger.info(`[TRANSCRIPT] User said: "${transcript}"`);
+  logger.info(`${"=".repeat(60)}\n`);
+
+  // TODO: call your backend API and play back the response audio.
+  //
+  // Example:
+  //   const response = await fetch(process.env.BACKEND_API_URL, {
+  //     method: "POST",
+  //     headers: { "Content-Type": "application/json" },
+  //     body: JSON.stringify({ transcript, callUUID }),
+  //   });
+  //   const { audioUrl } = await response.json();
+  //   playAudioToCall(callUUID, audioUrl);  // implement with Plivo REST API
 }
 
-/* ───────────────────────── UTILS ───────────────────────── */
+// ── Util ─────────────────────────────────────────────────────────────────────
+
 function escapeXml(str) {
   return str
     .replace(/&/g, "&amp;")
@@ -280,16 +264,17 @@ function escapeXml(str) {
     .replace(/'/g, "&apos;");
 }
 
-/* ───────────────────────── START ───────────────────────── */
+// ── Start ────────────────────────────────────────────────────────────────────
+
 httpServer.listen(PORT, "0.0.0.0", () => {
-  logger.info(`\n🚀 SERVER STARTED`);
-  logger.info(`   Port:    ${PORT}`);
-  logger.info(`   Answer:  ${BASE_URL}/answer`);
-  logger.info(`   Stream:  ${WS_STREAM_URL}`);
-  logger.info(`   Greeting: "${GREETING_TEXT}"`);
+  logger.info(`\n🚀 Server running on port ${PORT}`);
+  logger.info(`   Answer URL : ${BASE_URL}/answer`);
+  logger.info(`   Stream URL : ${WS_STREAM_URL}`);
+  logger.info(`   Language   : ${LANGUAGE}`);
+  logger.info(`   Greeting   : "${GREETING_TEXT}"`);
 });
 
 process.on("SIGINT", () => {
-  logger.info(`[SYSTEM] SIGINT — shutting down`);
+  logger.info(`[SYSTEM] Shutting down...`);
   process.exit(0);
 });
