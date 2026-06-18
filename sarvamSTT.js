@@ -268,17 +268,36 @@ class SarvamSTT {
     this._send(pcmBuffer);
   }
 
-  _send(buffer) {
-    // SDK expects base64 WAV/PCM depending on config
-    const payload = {
-      audio: {
-        data: buffer.toString("base64"),
-        encoding: "pcm_s16le",
-        sample_rate: 8000,
-      },
-    };
+  _send(pcmBuffer) {
+    try {
+      const payload = {
+        audio: {
+          data: pcmBuffer.toString("base64"),
+          encoding: "pcm_s16le",
+          sample_rate: 8000,
+        },
+      };
 
-    this.socket.send(JSON.stringify(payload));
+      // 🔥 SAFE CALL (NO ASSUMPTION ABOUT SDK TYPE)
+      if (this.socket?.send) {
+        this.socket.send(JSON.stringify(payload));
+        return;
+      }
+
+      if (this.socket?.write) {
+        this.socket.write(pcmBuffer);
+        return;
+      }
+
+      if (this.socket?.transcribe) {
+        this.socket.transcribe(payload);
+        return;
+      }
+
+      throw new Error("Sarvam stream does not support send/write/transcribe");
+    } catch (err) {
+      console.error("sendAudio error:", err.message);
+    }
   }
 
   async disconnect() {
