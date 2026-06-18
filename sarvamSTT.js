@@ -261,7 +261,7 @@ class SarvamSTT {
   _send(pcmBuffer) {
     try {
       // ✅ IMPORTANT: SDK expects raw buffer
-      this.stream.sendAudio(pcmBuffer);
+      this.stream.transcribe(pcmBuffer);
     } catch (err) {
       logger.error(`[${this.callUUID}] sendAudio error: ${err.message}`);
     }
