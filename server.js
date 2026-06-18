@@ -62,11 +62,11 @@ app.get("/answer", (req, res) => {
   const callUUID = req.query.CallUUID || "unknown";
   logger.info(`[HTTP] /answer — CallUUID: ${callUUID}`);
 
+  // Just speak and wait — stream is passed via call API directly
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Stream keepCallAlive="true" bidirectional="false">
-    ${WS_STREAM_URL}
-  </Stream>
+  <Speak>Hello! How can I help you today?</Speak>
+  <Wait length="7200"/>
 </Response>`;
 
   logger.info(`[HTTP] Sending XML:\n${xml}`);
@@ -98,6 +98,10 @@ app.post("/make-call", async (req, res) => {
         hangupUrl: `${BASE_URL}/hangup`,
         hangupMethod: "POST",
         callTimeout: "60",
+        // Pass stream URL directly in the call — works on all plans
+        streamUrl: WS_STREAM_URL,
+        streamTimeout: "86400",
+        streamTrack: "inbound_track",
       },
     );
     logger.info(
