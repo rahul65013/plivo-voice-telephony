@@ -60,22 +60,16 @@ app.get("/health", (req, res) => {
 
 app.get("/answer", (req, res) => {
   const callUUID = req.query.CallUUID || "unknown";
-  logger.info(`[HTTP] /answer hit — CallUUID: ${callUUID}`);
-  logger.info(`[HTTP] Telling Plivo to stream audio to: ${WS_STREAM_URL}`);
+  logger.info(`[HTTP] /answer — CallUUID: ${callUUID}`);
 
-  const response = new plivo.Response();
-  response.addSpeak("Hello, I am your AI assistant. How can I help you today?");
-  response.addStream(WS_STREAM_URL, {
-    bidirectional: "false",
-    audioTrack: "inbound",
-    streamTimeout: "86400",
-    keepCallAlive: "true",
-  });
-  response.addWait({ length: "7200" });
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Stream keepCallAlive="true" bidirectional="false">
+    ${WS_STREAM_URL}
+  </Stream>
+</Response>`;
 
-  const xml = response.toXML();
-  logger.info(`[HTTP] Sending XML to Plivo:\n${xml}`);
-
+  logger.info(`[HTTP] Sending XML:\n${xml}`);
   res.set("Content-Type", "text/xml");
   res.send(xml);
 });
@@ -157,15 +151,10 @@ wss.on("connection", (ws, req) => {
       case "start": {
         const callUUID = msg.start?.callId || `call-${Date.now()}`;
         const fmt = msg.start?.mediaFormat || {};
-
-        logger.info(`\n${"─".repeat(60)}`);
-        logger.info(`[WS] CALL STREAM STARTED`);
-        logger.info(`[WS]   callUUID   : ${callUUID}`);
-        logger.info(`[WS]   encoding   : ${fmt.encoding}`); // should be audio/x-mulaw
-        logger.info(`[WS]   sampleRate : ${fmt.sampleRate}`); // should be 8000
-        logger.info(`[WS]   channels   : ${fmt.channels}`); // should be 1
-        logger.info(`[WS]   tracks     : ${JSON.stringify(msg.start?.tracks)}`);
-        logger.info(`${"─".repeat(60)}\n`);
+        logger.info(`[WS] CALL STARTED — ${callUUID}`);
+        logger.info(
+          `[WS] encoding: ${fmt.encoding} | sampleRate: ${fmt.sampleRate}`,
+        );
 
         session = new CallSession({
           callUUID,
@@ -174,15 +163,23 @@ wss.on("connection", (ws, req) => {
         });
         sessions.set(callUUID, session);
 
-        logger.info(`[WS] Starting Sarvam STT session for ${callUUID}...`);
-        session.start().catch((err) => {
-          logger.error(`[WS] ❌ Failed to start STT session: ${err.message}`);
-          logger.error(`[WS]    This means Sarvam AI connection failed`);
-          logger.error(`[WS]    Check: SARVAM_API_KEY is correct`);
-          logger.error(
-            `[WS]    Check: EC2 can reach api.sarvam.ai on port 443`,
+        // Start STT first
+        session
+          .start()
+          .catch((err) =>
+            logger.error(`[WS] Session start failed: ${err.message}`),
           );
-        });
+
+        // Play greeting immediately after stream opens
+        // Small delay to let STT connect first
+        setTimeout(() => {
+          session
+            .playGreeting()
+            .catch((err) =>
+              logger.error(`[WS] Greeting failed: ${err.message}`),
+            );
+        }, 1000);
+
         break;
       }
 

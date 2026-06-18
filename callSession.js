@@ -61,6 +61,45 @@ class CallSession {
     }
   }
 
+  // Play greeting to caller via Plivo REST API
+  async playGreeting() {
+    // Option A — Use a TTS audio URL (recommended)
+    // Generate this once using any TTS service and host it publicly
+    const greetingUrl = process.env.GREETING_AUDIO_URL;
+
+    // Option B — Use Plivo's built-in Speak via REST
+    // This uses Plivo's own TTS so no audio URL needed
+    try {
+      const client = new plivo.Client(
+        process.env.PLIVO_AUTH_ID,
+        process.env.PLIVO_AUTH_TOKEN,
+      );
+
+      if (greetingUrl) {
+        // Play a pre-recorded audio file
+        await client.calls.playSound(this.callUUID, greetingUrl, {
+          loop: 1,
+          legs: "aleg",
+        });
+        logger.info(`[${this.callUUID}] ✅ Greeting audio playing`);
+      } else {
+        // Use Plivo speak via REST
+        await client.calls.speakText(
+          this.callUUID,
+          process.env.GREETING_TEXT || "Hello, how can I help you today?",
+          { voice: "WOMAN", language: "en-US", legs: "aleg" },
+        );
+        logger.info(`[${this.callUUID}] ✅ Greeting text spoken`);
+      }
+    } catch (err) {
+      if (err.statusCode === 404) {
+        logger.warn(`[${this.callUUID}] Call ended before greeting could play`);
+      } else {
+        logger.error(`[${this.callUUID}] Greeting failed: ${err.message}`);
+      }
+    }
+  }
+
   handleAudioChunk(base64Payload) {
     if (!base64Payload) {
       logger.warn(`[${this.callUUID}] Empty audio payload received`);
