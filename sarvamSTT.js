@@ -1,71 +1,64 @@
 /**
- * sarvamSTT.js
- *
- * Manages a single WebSocket connection to Sarvam AI STT per call.
- *
- * Official Sarvam protocol:
- *   - Connect: wss://api.sarvam.ai/v1/speech-to-text/streaming?model=saaras:v3&...
- *   - Auth:    header  api-subscription-key: YOUR_KEY
- *   - Audio:   send raw BINARY frames (PCM 16-bit LE) — NOT base64-wrapped JSON
- *   - Receive: JSON messages { type, transcript? }
- *     types:  "transcript"   → final sentence  { transcript: "text" }
- *             "speech_start" → VAD detected speech beginning
- *             "speech_end"   → VAD detected speech ending (transcript will follow)
- *   - Flush:  send JSON { type: "flush" } to force processing remaining audio
+ * sarvamSTT.js — with full debug logging
  */
 
 const WebSocket = require("ws");
-const logger    = require("./logger");
+const logger = require("./logger");
 
 class SarvamSTT {
   constructor({ callUUID, apiKey, language, onTranscript, onVAD, onError }) {
-    this.callUUID     = callUUID;
-    this.apiKey       = apiKey;
-    this.language     = language || "en-IN";
+    this.callUUID = callUUID;
+    this.apiKey = apiKey;
+    this.language = language || "en-IN";
     this.onTranscript = onTranscript || (() => {});
-    this.onVAD        = onVAD        || (() => {});
-    this.onError      = onError      || ((e) => logger.error(`[${callUUID}] STT error: ${e.message}`));
+    this.onVAD = onVAD || (() => {});
+    this.onError = onError || ((e) => logger.error(`STT error: ${e.message}`));
 
-    this.ws               = null;
-    this.isReady          = false;
-    this.audioQueue       = [];   // buffer chunks queued before WS opens
-    this.reconnectCount   = 0;
-    this.MAX_RECONNECTS   = 3;
-    this.destroyed        = false; // set true on intentional disconnect
+    this.ws = null;
+    this.isReady = false;
+    this.audioQueue = [];
+    this.reconnectCount = 0;
+    this.MAX_RECONNECTS = 3;
+    this.destroyed = false;
+    this.audioSentCount = 0;
   }
 
   connect() {
     return new Promise((resolve, reject) => {
-      if (this.destroyed) return reject(new Error("SarvamSTT instance was destroyed"));
+      if (this.destroyed) return reject(new Error("Instance destroyed"));
 
-      // All config goes in query params — Sarvam does NOT use a JSON handshake frame
       const params = new URLSearchParams({
-        model:                "saaras:v3",
-        mode:                 "transcribe",
-        language_code:        this.language,
-        sample_rate:          "8000",       // Plivo telephony = 8kHz
-        input_audio_codec:    "pcm_s16le",  // REQUIRED for PCM formats
-        high_vad_sensitivity: "true",       // 0.5s silence boundary — best for calls
-        vad_signals:          "true",       // receive speech_start / speech_end events
+        model: "saaras:v3",
+        mode: "transcribe",
+        language_code: this.language,
+        sample_rate: "8000",
+        input_audio_codec: "pcm_s16le",
+        high_vad_sensitivity: "true",
+        vad_signals: "true",
       });
 
       const url = `wss://api.sarvam.ai/v1/speech-to-text/streaming?${params}`;
-      logger.info(`[${this.callUUID}] STT connecting → ${url}`);
+
+      logger.info(`[${this.callUUID}] Sarvam STT connecting to:`);
+      logger.info(`[${this.callUUID}] ${url}`);
 
       this.ws = new WebSocket(url, {
         headers: { "api-subscription-key": this.apiKey },
       });
-
-      this.ws.binaryType = "nodebuffer"; // receive binary as Buffer
+      this.ws.binaryType = "nodebuffer";
 
       this.ws.on("open", () => {
-        logger.info(`[${this.callUUID}] STT ✅ connected to Sarvam AI`);
-        this.isReady        = true;
+        logger.info(`[${this.callUUID}] ✅ Sarvam WebSocket OPEN`);
+        logger.info(
+          `[${this.callUUID}]    Queued audio chunks to flush: ${this.audioQueue.length}`,
+        );
+        this.isReady = true;
         this.reconnectCount = 0;
 
-        // Flush audio buffered while connecting
         if (this.audioQueue.length > 0) {
-          logger.info(`[${this.callUUID}] STT flushing ${this.audioQueue.length} buffered chunks`);
+          logger.info(
+            `[${this.callUUID}] Flushing ${this.audioQueue.length} buffered chunks to Sarvam`,
+          );
           for (const chunk of this.audioQueue) this.ws.send(chunk);
           this.audioQueue = [];
         }
@@ -73,16 +66,23 @@ class SarvamSTT {
       });
 
       this.ws.on("message", (data) => {
+        // Log RAW message from Sarvam so we see everything it sends
+        const raw = data.toString();
+        logger.info(`[${this.callUUID}] 📨 Sarvam raw message: ${raw}`);
+
         try {
-          const msg = JSON.parse(data.toString());
+          const msg = JSON.parse(raw);
           this._handleMessage(msg);
         } catch {
-          // Binary pong or non-JSON keepalive — ignore
+          logger.debug(`[${this.callUUID}] Non-JSON from Sarvam: ${raw}`);
         }
       });
 
       this.ws.on("error", (err) => {
-        logger.error(`[${this.callUUID}] STT WebSocket error: ${err.message}`);
+        logger.error(
+          `[${this.callUUID}] ❌ Sarvam WebSocket ERROR: ${err.message}`,
+        );
+        logger.error(`[${this.callUUID}]    Error code: ${err.code}`);
         this.isReady = false;
         this.onError(err);
         reject(err);
@@ -90,15 +90,25 @@ class SarvamSTT {
 
       this.ws.on("close", (code, reason) => {
         const r = reason?.toString() || "";
-        logger.warn(`[${this.callUUID}] STT closed — code: ${code} reason: "${r}"`);
+        logger.warn(
+          `[${this.callUUID}] Sarvam WebSocket CLOSED — code: ${code} reason: "${r}"`,
+        );
+        logger.warn(
+          `[${this.callUUID}] Total audio frames sent to Sarvam: ${this.audioSentCount}`,
+        );
         this.isReady = false;
 
-        // Reconnect on network-level abnormal close only
-        // 4xxx = Sarvam auth / quota error → don't retry
-        if (!this.destroyed && code === 1006 && this.reconnectCount < this.MAX_RECONNECTS) {
+        // Reconnect on network drop
+        if (
+          !this.destroyed &&
+          code === 1006 &&
+          this.reconnectCount < this.MAX_RECONNECTS
+        ) {
           const delay = Math.min(300 * Math.pow(2, this.reconnectCount), 4000);
           this.reconnectCount++;
-          logger.warn(`[${this.callUUID}] STT reconnecting in ${delay}ms (attempt ${this.reconnectCount})`);
+          logger.warn(
+            `[${this.callUUID}] Reconnecting in ${delay}ms (attempt ${this.reconnectCount}/${this.MAX_RECONNECTS})`,
+          );
           setTimeout(() => this.connect().catch(this.onError), delay);
         }
       });
@@ -106,58 +116,77 @@ class SarvamSTT {
   }
 
   _handleMessage(msg) {
+    logger.info(`[${this.callUUID}] Sarvam message type: "${msg.type}"`);
+
     switch (msg.type) {
       case "transcript": {
         const text = (msg.transcript || "").trim();
-        if (text) {
-          logger.info(`[${this.callUUID}] 📝 TRANSCRIPT: "${text}"`);
-          this.onTranscript(text);
-        }
+        logger.info(`[${this.callUUID}] 🎯 TRANSCRIPT RECEIVED: "${text}"`);
+        if (text) this.onTranscript(text);
+        else logger.warn(`[${this.callUUID}] Empty transcript received`);
         break;
       }
       case "speech_start":
-        logger.debug(`[${this.callUUID}] 🎙  speech_start`);
+        logger.info(`[${this.callUUID}] Sarvam VAD: speech_start`);
         this.onVAD("START_SPEECH");
         break;
       case "speech_end":
-        logger.debug(`[${this.callUUID}] 🔇 speech_end`);
+        logger.info(
+          `[${this.callUUID}] Sarvam VAD: speech_end — transcript should follow`,
+        );
         this.onVAD("END_SPEECH");
         break;
       default:
-        logger.debug(`[${this.callUUID}] STT msg type: ${msg.type}`);
+        logger.info(
+          `[${this.callUUID}] Sarvam unknown type: ${msg.type} — full: ${JSON.stringify(msg)}`,
+        );
     }
   }
 
-  /**
-   * Send PCM 16-bit Buffer as a raw BINARY WebSocket frame.
-   * Plivo sends ~50 chunks/sec. This must be fast.
-   */
   sendAudio(pcmBuffer) {
     if (this.destroyed) return;
 
     if (!this.isReady || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.audioQueue.push(pcmBuffer); // queue it — will flush on open/reconnect
+      this.audioQueue.push(pcmBuffer);
+      // Log if queue is growing (means Sarvam hasn't connected yet)
+      if (this.audioQueue.length % 50 === 0) {
+        logger.warn(
+          `[${this.callUUID}] STT not ready — audio queue size: ${this.audioQueue.length}`,
+        );
+      }
       return;
     }
 
-    this.ws.send(pcmBuffer); // raw binary — NOT JSON-wrapped
+    this.audioSentCount++;
+    this.ws.send(pcmBuffer);
+
+    // Confirm first audio frame reached Sarvam
+    if (this.audioSentCount === 1) {
+      logger.info(`[${this.callUUID}] ✅ First PCM frame sent to Sarvam AI`);
+    }
+    if (this.audioSentCount % 200 === 0) {
+      logger.info(
+        `[${this.callUUID}] 📡 Sent ${this.audioSentCount} PCM frames to Sarvam`,
+      );
+    }
   }
 
-  /** Force Sarvam to process any audio remaining in its internal buffer */
   flush() {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      logger.info(`[${this.callUUID}] Sending flush to Sarvam`);
       this.ws.send(JSON.stringify({ type: "flush" }));
     }
   }
 
   disconnect() {
+    logger.info(`[${this.callUUID}] Disconnecting from Sarvam STT`);
     this.destroyed = true;
     this.flush();
     if (this.ws) {
       this.ws.close(1000, "Call ended");
       this.ws = null;
     }
-    this.isReady    = false;
+    this.isReady = false;
     this.audioQueue = [];
   }
 }
