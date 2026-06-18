@@ -13,17 +13,21 @@
 
 require("dotenv").config();
 
-const http        = require("http");
-const WebSocket   = require("ws");
-const express     = require("express");
-const plivo       = require("plivo");
+const http = require("http");
+const WebSocket = require("ws");
+const express = require("express");
+const plivo = require("plivo");
 const CallSession = require("./callSession");
-const logger      = require("./logger");
+const logger = require("./logger");
 
 // ── Validate required env vars on startup ─────────────────────────────────────
 const REQUIRED = [
-  "PLIVO_AUTH_ID", "PLIVO_AUTH_TOKEN", "PLIVO_FROM_NUMBER",
-  "SARVAM_API_KEY", "SERVER_BASE_URL", "BACKEND_API_URL",
+  "PLIVO_AUTH_ID",
+  "PLIVO_AUTH_TOKEN",
+  "PLIVO_FROM_NUMBER",
+  "SARVAM_API_KEY",
+  "SERVER_BASE_URL",
+  "BACKEND_API_URL",
 ];
 const missing = REQUIRED.filter((k) => !process.env[k]);
 if (missing.length) {
@@ -31,15 +35,16 @@ if (missing.length) {
   process.exit(1);
 }
 
-const PORT           = parseInt(process.env.PORT || "8080", 10);
-const BASE_URL       = process.env.SERVER_BASE_URL.replace(/\/$/, ""); // trim trailing slash
+const PORT = parseInt(process.env.PORT || "8080", 10);
+const BASE_URL = process.env.SERVER_BASE_URL.replace(/\/$/, ""); // trim trailing slash
 const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
-const LANGUAGE       = process.env.SARVAM_LANGUAGE || "en-IN";
+const LANGUAGE = process.env.SARVAM_LANGUAGE || "en-IN";
 
 // WebSocket URL that Plivo will connect to
 // BASE_URL is https:// → replace with wss://
-const WS_STREAM_URL = BASE_URL.replace(/^https:\/\//, "wss://")
-                               .replace(/^http:\/\//, "ws://") + "/stream";
+const WS_STREAM_URL =
+  BASE_URL.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://") +
+  "/stream";
 
 // ── Express app (HTTP routes) ──────────────────────────────────────────────────
 const app = express();
@@ -54,17 +59,24 @@ app.get("/health", (req, res) => {
 // Plivo calls this when the callee answers the outbound call
 app.get("/answer", (req, res) => {
   const callUUID = req.query.CallUUID || "unknown";
-  logger.info(`[HTTP] /answer → CallUUID: ${callUUID} | streamUrl: ${WS_STREAM_URL}`);
 
-  // Return Plivo XML instructing it to open a WebSocket to /stream
   const response = new plivo.Response();
+
+  // 1. PLAY greeting first
+  response.addSpeak("Hello, I am your AI assistant. How can I help you today?");
+
+  // OR if you want audio file:
+  // response.addPlay("https://your-domain/welcome.mp3");
+
+  // 2. START STREAM after greeting
   response.addStream(WS_STREAM_URL, {
-    bidirectional:     "false",    // we only need inbound (callee's voice)
-    audioTrack:        "inbound",  // only capture what callee says
-    streamTimeout:     "86400",    // keep stream open up to 24h
-    keepCallAlive:     "true",     // don't hang up when stream starts
+    bidirectional: "false",
+    audioTrack: "inbound",
+    streamTimeout: "86400",
+    keepCallAlive: "true",
   });
-  // Keep call alive while streaming (Plivo needs something to do)
+
+  // 3. keep call alive
   response.addWait({ length: "7200" });
 
   res.set("Content-Type", "text/xml");
@@ -73,7 +85,9 @@ app.get("/answer", (req, res) => {
 
 // Plivo calls this when the call ends
 app.post("/hangup", (req, res) => {
-  logger.info(`[HTTP] /hangup → CallUUID: ${req.body.CallUUID} | Cause: ${req.body.HangupCause}`);
+  logger.info(
+    `[HTTP] /hangup → CallUUID: ${req.body.CallUUID} | Cause: ${req.body.HangupCause}`,
+  );
   res.sendStatus(200);
 });
 
@@ -84,19 +98,24 @@ app.post("/make-call", async (req, res) => {
   if (!toNumber) return res.status(400).json({ error: "toNumber is required" });
 
   try {
-    const client = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN);
+    const client = new plivo.Client(
+      process.env.PLIVO_AUTH_ID,
+      process.env.PLIVO_AUTH_TOKEN,
+    );
     const result = await client.calls.create(
       process.env.PLIVO_FROM_NUMBER,
       toNumber,
       `${BASE_URL}/answer`,
       {
         answerMethod: "GET",
-        hangupUrl:    `${BASE_URL}/hangup`,
+        hangupUrl: `${BASE_URL}/hangup`,
         hangupMethod: "POST",
-        callTimeout:  "60",
-      }
+        callTimeout: "60",
+      },
     );
-    logger.info(`[HTTP] Outbound call initiated → ${toNumber} | requestUuid: ${result.requestUuid}`);
+    logger.info(
+      `[HTTP] Outbound call initiated → ${toNumber} | requestUuid: ${result.requestUuid}`,
+    );
     res.json({ success: true, requestUuid: result.requestUuid });
   } catch (err) {
     logger.error(`[HTTP] make-call failed: ${err.message}`);
@@ -129,25 +148,30 @@ wss.on("connection", (ws, req) => {
     }
 
     switch (msg.event) {
-
       // ── "start": fired once when Plivo begins streaming for a call ──────────
       case "start": {
         const callUUID = msg.start?.callId || `call-${Date.now()}`;
-        const fmt      = msg.start?.mediaFormat || {};
+        const fmt = msg.start?.mediaFormat || {};
 
         logger.info(`[WS] ── CALL STARTED ──────────────────────────────`);
         logger.info(`[WS]   callUUID   : ${callUUID}`);
-        logger.info(`[WS]   encoding   : ${fmt.encoding}`);    // audio/x-mulaw
-        logger.info(`[WS]   sampleRate : ${fmt.sampleRate}`);  // 8000
-        logger.info(`[WS]   channels   : ${fmt.channels}`);    // 1
+        logger.info(`[WS]   encoding   : ${fmt.encoding}`); // audio/x-mulaw
+        logger.info(`[WS]   sampleRate : ${fmt.sampleRate}`); // 8000
+        logger.info(`[WS]   channels   : ${fmt.channels}`); // 1
         logger.info(`[WS] ──────────────────────────────────────────────`);
 
-        session = new CallSession({ callUUID, sarvamApiKey: SARVAM_API_KEY, language: LANGUAGE });
+        session = new CallSession({
+          callUUID,
+          sarvamApiKey: SARVAM_API_KEY,
+          language: LANGUAGE,
+        });
         sessions.set(callUUID, session);
 
         // Connect to Sarvam STT (non-blocking — audio will buffer until ready)
         session.start().catch((err) => {
-          logger.error(`[WS] Failed to start session for ${callUUID}: ${err.message}`);
+          logger.error(
+            `[WS] Failed to start session for ${callUUID}: ${err.message}`,
+          );
         });
         break;
       }
@@ -235,7 +259,7 @@ const shutdown = async (signal) => {
 };
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT",  () => shutdown("SIGINT"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 
 process.on("uncaughtException", (err) => {
   logger.error(`Uncaught exception: ${err.message}`, err);
