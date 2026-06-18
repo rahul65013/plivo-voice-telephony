@@ -179,7 +179,7 @@
 
 
 
-const { SarvamAIClient  } = require("sarvamai");
+const { SarvamAIClient } = require("sarvamai");
 const logger = require("./logger");
 
 class SarvamSTT {
@@ -194,34 +194,34 @@ class SarvamSTT {
 
     this.onTranscript = onTranscript || (() => {});
     this.onVAD = onVAD || (() => {});
-    this.onError = onError || (() => logger.error("STT error"));
+    this.onError = onError || (() => {});
 
     this.stream = null;
-    this.audioQueue = [];
     this.ready = false;
+    this.queue = [];
   }
 
   async connect() {
     try {
-      logger.info(`[${this.callUUID}] Connecting Sarvam SDK stream...`);
+      logger.info(`[${this.callUUID}] Connecting Sarvam...`);
 
-      // 🔥 SDK handles WS internally
+      // ✅ CORRECT SDK ENTRY (IMPORTANT FIX)
       this.stream = await this.client.speechToTextStreaming.connect({
         model: "saaras:v3",
         mode: "transcribe",
         language_code: this.language,
         sample_rate: 8000,
-        vad_signals: true,
         high_vad_sensitivity: true,
+        vad_signals: true,
       });
 
       this.ready = true;
 
       logger.info(`[${this.callUUID}] Sarvam stream OPEN`);
 
-      // Listen to events
+      // 🔥 Incoming messages
       this.stream.on("data", (msg) => {
-        logger.info(`[${this.callUUID}] Sarvam →`, msg);
+        logger.info(`[${this.callUUID}] MSG:`, msg);
 
         if (msg.type === "transcript") {
           const text = msg.transcript?.trim();
@@ -243,25 +243,38 @@ class SarvamSTT {
       });
 
       // flush queued audio
-      for (const chunk of this.audioQueue) {
-        this.sendAudio(chunk);
+      for (const chunk of this.queue) {
+        this._send(chunk);
       }
-      this.audioQueue = [];
+      this.queue = [];
     } catch (err) {
-      logger.error(`[${this.callUUID}] Connect failed: ${err.message}`);
+      logger.error(`[${this.callUUID}] CONNECT FAILED: ${err.message}`);
       this.onError(err);
     }
   }
 
-  // 🔥 Send PCM audio (from Plivo after μ-law decode)
+  // ✅ PUBLIC API
   sendAudio(pcmBuffer) {
     if (!this.ready || !this.stream) {
-      this.audioQueue.push(pcmBuffer);
+      this.queue.push(pcmBuffer);
       return;
     }
 
+    this._send(pcmBuffer);
+  }
+
+  // 🔥 IMPORTANT FIX: SDK DOES NOT USE .send()
+  _send(pcmBuffer) {
     try {
-      this.stream.send(pcmBuffer);
+      if (typeof this.stream.write === "function") {
+        this.stream.write(pcmBuffer); // ✔ correct for many builds
+      } else if (typeof this.stream.sendAudio === "function") {
+        this.stream.sendAudio(pcmBuffer); // ✔ fallback
+      } else if (typeof this.stream.send === "function") {
+        this.stream.send(pcmBuffer); // ✔ rare fallback
+      } else {
+        throw new Error("No valid stream send method found");
+      }
     } catch (err) {
       logger.error(`[${this.callUUID}] sendAudio error: ${err.message}`);
     }
@@ -269,15 +282,15 @@ class SarvamSTT {
 
   flush() {
     try {
-      this.stream?.send(JSON.stringify({ type: "flush" }));
+      if (this.stream?.flush) this.stream.flush();
     } catch (e) {}
   }
 
   disconnect() {
-    logger.info(`[${this.callUUID}] Disconnecting Sarvam`);
     this.stream?.close?.();
     this.stream = null;
     this.ready = false;
+    this.queue = [];
   }
 }
 
