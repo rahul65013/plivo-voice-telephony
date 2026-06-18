@@ -179,15 +179,15 @@
 
 
 
-const { SarvamAIClient } = require("sarvamai");
+const { AsyncSarvamAI } = require("sarvamai");
 const logger = require("./logger");
 
 class SarvamSTT {
   constructor({ callUUID, apiKey, language, onTranscript, onVAD, onError }) {
     this.callUUID = callUUID;
 
-    this.client = new SarvamAIClient({
-      apiSubscriptionKey: apiKey,
+    this.client = new AsyncSarvamAI({
+      api_subscription_key: apiKey,
     });
 
     this.language = language || "en-IN";
