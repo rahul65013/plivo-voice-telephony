@@ -73,8 +73,7 @@ app.all("/answer", (_req, res) => {
   <Stream
     bidirectional="true"
     keepCallAlive="true"
-    contentType="audio/x-l16;rate=8000"
-    audioTrack="inbound">
+    contentType="audio/x-mulaw;rate=8000">
     ${WS_STREAM_URL}
   </Stream>
 </Response>`;
