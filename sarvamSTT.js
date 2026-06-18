@@ -179,15 +179,15 @@
 
 
 
-const { AsyncSarvamAI } = require("sarvamai");
+const { SarvamAIClient  } = require("sarvamai");
 const logger = require("./logger");
 
 class SarvamSTT {
   constructor({ callUUID, apiKey, language, onTranscript, onVAD, onError }) {
     this.callUUID = callUUID;
 
-    this.client = new AsyncSarvamAI({
-      api_subscription_key: apiKey,
+    this.client = new SarvamAIClient({
+      apiSubscriptionKey: apiKey,
     });
 
     this.language = language || "en-IN";
@@ -206,7 +206,7 @@ class SarvamSTT {
       logger.info(`[${this.callUUID}] Connecting Sarvam SDK stream...`);
 
       // 🔥 SDK handles WS internally
-      this.stream = await this.client.speech_to_text_streaming.connect({
+      this.stream = await this.client.speechToTextStreaming.connect({
         model: "saaras:v3",
         mode: "transcribe",
         language_code: this.language,
