@@ -162,25 +162,21 @@
 const SarvamSTT = require("./sarvamSTT");
 const logger = require("./logger");
 
-const UTTERANCE_GAP_MS = 1500;
+// Plivo sends μ-law base64 @ 8000Hz
+function mulawBase64ToBuffer(base64) {
+  return Buffer.from(base64, "base64");
+}
 
 class CallSession {
   constructor({ callUUID, sarvamApiKey, language, onTranscriptReady }) {
     this.callUUID = callUUID;
     this.language = language || "en-IN";
-
     this.onTranscriptReady = onTranscriptReady;
 
     this.stt = null;
-
     this.segments = [];
-    this.isSpeaking = false;
-
     this.flushTimer = null;
-
-    // 🔥 NEW: buffer safety
-    this.audioCount = 0;
-    this.lastAudioTime = Date.now();
+    this.isSpeaking = false;
   }
 
   async start() {
@@ -188,29 +184,24 @@ class CallSession {
       callUUID: this.callUUID,
       apiKey: process.env.SARVAM_API_KEY,
       language: this.language,
-
-      onTranscript: (text) => this._onSegment(text),
-      onVAD: (sig) => this._onVAD(sig),
-      onError: (err) => logger.error(err),
+      onTranscript: (t) => this._onSegment(t),
+      onVAD: (v) => this._onVAD(v),
+      onError: (e) => logger.error(e),
     });
 
     await this.stt.connect();
   }
 
-  handleAudioChunk(pcmBuffer) {
-    if (!this.stt) return;
+  // ✅ PLIVO INPUT (base64 only)
+  handleAudioChunk(base64Payload) {
+    if (!this.stt || !base64Payload) return;
 
-    this.audioCount++;
-    this.lastAudioTime = Date.now();
+    const pcmBuffer = mulawBase64ToBuffer(base64Payload);
 
     this.stt.sendAudio(pcmBuffer);
   }
 
-  /* ───────────────────────── VAD ───────────────────────── */
-
   _onVAD(signal) {
-    logger.info(`[${this.callUUID}] VAD: ${signal}`);
-
     if (signal === "START_SPEECH") {
       this.isSpeaking = true;
       this._cancelFlush();
@@ -218,66 +209,45 @@ class CallSession {
 
     if (signal === "END_SPEECH") {
       this.isSpeaking = false;
-
-      // 🔥 don't flush immediately, wait for final STT chunk
       this._scheduleFlush();
     }
   }
 
-  /* ───────────────────────── Transcript ───────────────────────── */
-
   _onSegment(text) {
-    logger.info(`[${this.callUUID}] Segment: ${text}`);
+    if (!text) return;
 
-    if (!text || !text.trim()) return;
+    this.segments.push(text);
 
-    this.segments.push(text.trim());
-
-    // 🔥 only schedule flush if user stopped speaking
     if (!this.isSpeaking) {
       this._scheduleFlush();
     }
   }
 
-  /* ───────────────────────── Flush logic ───────────────────────── */
-
   _scheduleFlush() {
     this._cancelFlush();
 
     this.flushTimer = setTimeout(() => {
-      this._fireFinal();
-    }, UTTERANCE_GAP_MS);
+      const full = this.segments.join(" ").trim();
+      this.segments = [];
+
+      if (full) {
+        logger.info(`[FINAL] ${full}`);
+        this.onTranscriptReady(full);
+      }
+    }, 1200);
   }
 
   _cancelFlush() {
     if (this.flushTimer) clearTimeout(this.flushTimer);
-    this.flushTimer = null;
   }
-
-  _fireFinal() {
-    const full = this.segments.join(" ").trim();
-    this.segments = [];
-
-    if (!full) return;
-
-    logger.info(`\n===== FINAL UTTERANCE =====`);
-    logger.info(`[${this.callUUID}] ${full}`);
-
-    this.onTranscriptReady(full);
-  }
-
-  /* ───────────────────────── End Call ───────────────────────── */
 
   async end() {
-    logger.info(`[${this.callUUID}] Call ending`);
-
     this._cancelFlush();
 
-    // 🔥 force final output
-    this._fireFinal();
+    const full = this.segments.join(" ").trim();
+    if (full) this.onTranscriptReady(full);
 
     await this.stt?.disconnect?.();
-    this.stt = null;
   }
 }
 

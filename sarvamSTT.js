@@ -190,89 +190,102 @@ class SarvamSTT {
 
     this.language = language || "en-IN";
 
-    this.onTranscript = onTranscript || (() => {});
-    this.onVAD = onVAD || (() => {});
-    this.onError = onError || (() => {});
+    this.onTranscript = onTranscript;
+    this.onVAD = onVAD;
+    this.onError = onError;
 
     this.socket = null;
-    this.buffer = Buffer.alloc(0);
+    this.ready = false;
+    this.bufferQueue = [];
   }
 
   async connect() {
-    logger.info(`[${this.callUUID}] Connecting Sarvam...`);
-
     this.socket = await this.client.speechToTextStreaming.connect({
       model: "saaras:v3",
       mode: "transcribe",
-      "language-code": this.language,
+      language_code: this.language,
+      sample_rate: 8000,
       high_vad_sensitivity: true,
+      vad_signals: true,
     });
+
+    this.ready = true;
 
     this.socket.on("message", (msg) => {
       try {
         const data = JSON.parse(msg.toString());
 
-        logger.info(`[${this.callUUID}] MSG:`, data);
-
         if (data.type === "transcript") {
-          if (data.transcript) {
-            this.onTranscript(data.transcript.trim());
-          }
+          this.onTranscript?.(data.transcript?.trim());
         }
 
         if (data.type === "speech_start") {
-          this.onVAD("START_SPEECH");
+          this.onVAD?.("START_SPEECH");
         }
 
         if (data.type === "speech_end") {
-          this.onVAD("END_SPEECH");
+          this.onVAD?.("END_SPEECH");
         }
       } catch (e) {
-        logger.warn(`[${this.callUUID}] Non-JSON message`);
+        logger.warn("Non-JSON STT message");
       }
     });
 
     this.socket.on("error", (err) => {
-      logger.error(`[${this.callUUID}] STT error: ${err.message}`);
-      this.onError(err);
+      this.onError?.(err);
     });
 
     await this.socket.waitForOpen();
+
+    // flush queued audio
+    for (const b of this.bufferQueue) {
+      this._send(b);
+    }
+
+    this.bufferQueue = [];
   }
 
-  // 🔥 PLIVO AUDIO INPUT
+  // ✅ ONLY BUFFER INPUT
   sendAudio(pcmBuffer) {
-    // accumulate chunks
-    this.buffer = Buffer.concat([this.buffer, pcmBuffer]);
+    if (!pcmBuffer) return;
 
-    // send every ~1 sec chunk (~16000 bytes at 8k mono)
-    if (this.buffer.length < 16000) return;
+    // 🔥 HARD GUARD (fix your crash permanently)
+    if (typeof pcmBuffer === "string") {
+      throw new Error(
+        "sendAudio expects Buffer, got string (BUG FIX NEEDED UPSTREAM)",
+      );
+    }
 
-    this._flushBuffer();
+    if (!Buffer.isBuffer(pcmBuffer)) {
+      pcmBuffer = Buffer.from(pcmBuffer);
+    }
+
+    if (!this.ready) {
+      this.bufferQueue.push(pcmBuffer);
+      return;
+    }
+
+    this._send(pcmBuffer);
   }
 
-  _flushBuffer() {
-    if (!this.socket) return;
+  _send(buffer) {
+    // SDK expects base64 WAV/PCM depending on config
+    const payload = {
+      audio: {
+        data: buffer.toString("base64"),
+        encoding: "pcm_s16le",
+        sample_rate: 8000,
+      },
+    };
 
-    const audioBase64 = this.buffer.toString("base64");
-
-    this.socket.transcribe({
-      audio: audioBase64,
-      sample_rate: 8000,
-      encoding: "audio/wav",
-    });
-
-    this.buffer = Buffer.alloc(0);
+    this.socket.send(JSON.stringify(payload));
   }
 
-  flush() {
-    this._flushBuffer();
-  }
-
-  disconnect() {
-    this.flush();
+  async disconnect() {
     this.socket?.close?.();
     this.socket = null;
+    this.ready = false;
+    this.bufferQueue = [];
   }
 }
 
