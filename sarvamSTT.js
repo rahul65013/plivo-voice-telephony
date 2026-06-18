@@ -32,10 +32,10 @@ class SarvamSTT {
         model: "saaras:v3",
         mode: "transcribe",
         language_code: this.language,
-        sample_rate: "8000",
-        input_audio_codec: "pcm_s16le",
-        high_vad_sensitivity: "true",
-        vad_signals: "true",
+        sample_rate: "16000",
+        // input_audio_codec: "pcm_s16le",
+        // high_vad_sensitivity: "true",
+        // vad_signals: "true",
       });
 
       const url = `wss://api.sarvam.ai/v1/speech-to-text/streaming?${params}`;
