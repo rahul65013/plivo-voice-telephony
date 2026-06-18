@@ -1,5 +1,6 @@
 /**
- * sarvamSTT.js — with full debug logging
+ * sarvamSTT.js
+ * Streams PCM16 audio to Sarvam AI and fires callbacks for transcripts + VAD.
  */
 
 const WebSocket = require("ws");
@@ -28,7 +29,7 @@ class SarvamSTT {
       if (this.destroyed) return reject(new Error("Instance destroyed"));
 
       const params = new URLSearchParams({
-        model: "saaras:v3",
+        model: "saaras:v2",
         mode: "transcribe",
         language_code: this.language,
         sample_rate: "8000",
@@ -38,107 +39,97 @@ class SarvamSTT {
       });
 
       const url = `wss://api.sarvam.ai/v1/speech-to-text/streaming?${params}`;
-
-      logger.info(`[${this.callUUID}] Sarvam STT connecting to:`);
-      logger.info(`[${this.callUUID}] ${url}`);
+      logger.info(`[${this.callUUID}] Sarvam STT → ${url}`);
 
       this.ws = new WebSocket(url, {
         headers: { "api-subscription-key": this.apiKey },
       });
       this.ws.binaryType = "nodebuffer";
 
+      let resolved = false;
+      const done = (err) => {
+        if (resolved) return;
+        resolved = true;
+        err ? reject(err) : resolve();
+      };
+
       this.ws.on("open", () => {
-        logger.info(`[${this.callUUID}] ✅ Sarvam WebSocket OPEN`);
-        logger.info(
-          `[${this.callUUID}]    Queued audio chunks to flush: ${this.audioQueue.length}`,
-        );
+        logger.info(`[${this.callUUID}] ✅ Sarvam WS open`);
         this.isReady = true;
         this.reconnectCount = 0;
 
         if (this.audioQueue.length > 0) {
           logger.info(
-            `[${this.callUUID}] Flushing ${this.audioQueue.length} buffered chunks to Sarvam`,
+            `[${this.callUUID}] Flushing ${this.audioQueue.length} queued chunks`,
           );
           for (const chunk of this.audioQueue) this.ws.send(chunk);
           this.audioQueue = [];
         }
-        resolve();
+        done();
       });
 
       this.ws.on("message", (data) => {
-        // Log RAW message from Sarvam so we see everything it sends
         const raw = data.toString();
-        logger.info(`[${this.callUUID}] 📨 Sarvam raw message: ${raw}`);
-
+        logger.info(`[${this.callUUID}] Sarvam ← ${raw}`);
         try {
-          const msg = JSON.parse(raw);
-          this._handleMessage(msg);
+          this._handleMessage(JSON.parse(raw));
         } catch {
-          logger.debug(`[${this.callUUID}] Non-JSON from Sarvam: ${raw}`);
+          logger.warn(`[${this.callUUID}] Non-JSON from Sarvam: ${raw}`);
         }
       });
 
       this.ws.on("error", (err) => {
-        logger.error(
-          `[${this.callUUID}] ❌ Sarvam WebSocket ERROR: ${err.message}`,
-        );
-        logger.error(`[${this.callUUID}]    Error code: ${err.code}`);
+        logger.error(`[${this.callUUID}] Sarvam WS error: ${err.message}`);
         this.isReady = false;
         this.onError(err);
-        reject(err);
+        done(err);
       });
 
       this.ws.on("close", (code, reason) => {
         const r = reason?.toString() || "";
         logger.warn(
-          `[${this.callUUID}] Sarvam WebSocket CLOSED — code: ${code} reason: "${r}"`,
-        );
-        logger.warn(
-          `[${this.callUUID}] Total audio frames sent to Sarvam: ${this.audioSentCount}`,
+          `[${this.callUUID}] Sarvam WS closed — code:${code} reason:"${r}" ` +
+            `frames_sent:${this.audioSentCount}`,
         );
         this.isReady = false;
 
-        // Reconnect on network drop
         if (
           !this.destroyed &&
           code === 1006 &&
           this.reconnectCount < this.MAX_RECONNECTS
         ) {
-          const delay = Math.min(300 * Math.pow(2, this.reconnectCount), 4000);
+          const delay = Math.min(300 * 2 ** this.reconnectCount, 4000);
           this.reconnectCount++;
           logger.warn(
-            `[${this.callUUID}] Reconnecting in ${delay}ms (attempt ${this.reconnectCount}/${this.MAX_RECONNECTS})`,
+            `[${this.callUUID}] Reconnecting in ${delay}ms (${this.reconnectCount}/${this.MAX_RECONNECTS})`,
           );
           setTimeout(() => this.connect().catch(this.onError), delay);
         }
+        // resolve on first close if we never opened (timeout scenario)
+        done();
       });
     });
   }
 
   _handleMessage(msg) {
-    logger.info(`[${this.callUUID}] Sarvam message type: "${msg.type}"`);
-
     switch (msg.type) {
       case "transcript": {
         const text = (msg.transcript || "").trim();
-        logger.info(`[${this.callUUID}] 🎯 TRANSCRIPT RECEIVED: "${text}"`);
+        logger.info(`[${this.callUUID}] 🎯 Transcript: "${text}"`);
         if (text) this.onTranscript(text);
-        else logger.warn(`[${this.callUUID}] Empty transcript received`);
         break;
       }
       case "speech_start":
-        logger.info(`[${this.callUUID}] Sarvam VAD: speech_start`);
+        logger.info(`[${this.callUUID}] VAD: speech_start`);
         this.onVAD("START_SPEECH");
         break;
       case "speech_end":
-        logger.info(
-          `[${this.callUUID}] Sarvam VAD: speech_end — transcript should follow`,
-        );
+        logger.info(`[${this.callUUID}] VAD: speech_end`);
         this.onVAD("END_SPEECH");
         break;
       default:
         logger.info(
-          `[${this.callUUID}] Sarvam unknown type: ${msg.type} — full: ${JSON.stringify(msg)}`,
+          `[${this.callUUID}] Sarvam unknown: ${JSON.stringify(msg)}`,
         );
     }
   }
@@ -148,38 +139,31 @@ class SarvamSTT {
 
     if (!this.isReady || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.audioQueue.push(pcmBuffer);
-      // Log if queue is growing (means Sarvam hasn't connected yet)
-      if (this.audioQueue.length % 50 === 0) {
+      if (this.audioQueue.length % 50 === 0)
         logger.warn(
-          `[${this.callUUID}] STT not ready — audio queue size: ${this.audioQueue.length}`,
+          `[${this.callUUID}] STT not ready — queue: ${this.audioQueue.length}`,
         );
-      }
       return;
     }
 
     this.audioSentCount++;
     this.ws.send(pcmBuffer);
 
-    // Confirm first audio frame reached Sarvam
-    if (this.audioSentCount === 1) {
-      logger.info(`[${this.callUUID}] ✅ First PCM frame sent to Sarvam AI`);
-    }
-    if (this.audioSentCount % 200 === 0) {
-      logger.info(
-        `[${this.callUUID}] 📡 Sent ${this.audioSentCount} PCM frames to Sarvam`,
-      );
-    }
+    if (this.audioSentCount === 1)
+      logger.info(`[${this.callUUID}] ✅ First PCM frame → Sarvam`);
+    if (this.audioSentCount % 200 === 0)
+      logger.info(`[${this.callUUID}] 📡 ${this.audioSentCount} frames sent`);
   }
 
   flush() {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      logger.info(`[${this.callUUID}] Sending flush to Sarvam`);
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      logger.info(`[${this.callUUID}] Flushing Sarvam`);
       this.ws.send(JSON.stringify({ type: "flush" }));
     }
   }
 
   disconnect() {
-    logger.info(`[${this.callUUID}] Disconnecting from Sarvam STT`);
+    logger.info(`[${this.callUUID}] Disconnecting Sarvam STT`);
     this.destroyed = true;
     this.flush();
     if (this.ws) {
