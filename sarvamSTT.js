@@ -177,8 +177,6 @@
 
 // module.exports = SarvamSTT;
 
-
-
 const { SarvamAIClient } = require("sarvamai");
 const logger = require("./logger");
 
@@ -199,27 +197,43 @@ class SarvamSTT {
     this.stream = null;
     this.ready = false;
     this.queue = [];
+
+    // 🔥 resolved once at runtime
+    this._sendMethod = null;
   }
 
   async connect() {
     try {
       logger.info(`[${this.callUUID}] Connecting Sarvam...`);
 
-      // ✅ CORRECT SDK ENTRY (IMPORTANT FIX)
       this.stream = await this.client.speechToTextStreaming.connect({
         model: "saaras:v3",
         mode: "transcribe",
         language_code: this.language,
         sample_rate: 8000,
-        high_vad_sensitivity: true,
         vad_signals: true,
+        high_vad_sensitivity: true,
       });
 
       this.ready = true;
 
-      logger.info(`[${this.callUUID}] Sarvam stream OPEN`);
+      // -------------------------
+      // 🔥 DETECT SEND METHOD ONCE
+      // -------------------------
+      this._sendMethod =
+        this.stream.send || this.stream.write || this.stream.sendAudio;
 
-      // 🔥 Incoming messages
+      if (!this._sendMethod) {
+        throw new Error("No valid send method on Sarvam stream");
+      }
+
+      logger.info(
+        `[${this.callUUID}] Using send method: ${this._sendMethod.name || "anonymous"}`,
+      );
+
+      // -------------------------
+      // EVENTS
+      // -------------------------
       this.stream.on("data", (msg) => {
         logger.info(`[${this.callUUID}] MSG:`, msg);
 
@@ -242,7 +256,7 @@ class SarvamSTT {
         this.onError(err);
       });
 
-      // flush queued audio
+      // flush queue
       for (const chunk of this.queue) {
         this._send(chunk);
       }
@@ -253,7 +267,6 @@ class SarvamSTT {
     }
   }
 
-  // ✅ PUBLIC API
   sendAudio(pcmBuffer) {
     if (!this.ready || !this.stream) {
       this.queue.push(pcmBuffer);
@@ -263,18 +276,9 @@ class SarvamSTT {
     this._send(pcmBuffer);
   }
 
-  // 🔥 IMPORTANT FIX: SDK DOES NOT USE .send()
   _send(pcmBuffer) {
     try {
-      if (typeof this.stream.write === "function") {
-        this.stream.write(pcmBuffer); // ✔ correct for many builds
-      } else if (typeof this.stream.sendAudio === "function") {
-        this.stream.sendAudio(pcmBuffer); // ✔ fallback
-      } else if (typeof this.stream.send === "function") {
-        this.stream.send(pcmBuffer); // ✔ rare fallback
-      } else {
-        throw new Error("No valid stream send method found");
-      }
+      this._sendMethod.call(this.stream, pcmBuffer);
     } catch (err) {
       logger.error(`[${this.callUUID}] sendAudio error: ${err.message}`);
     }
@@ -282,8 +286,8 @@ class SarvamSTT {
 
   flush() {
     try {
-      if (this.stream?.flush) this.stream.flush();
-    } catch (e) {}
+      this.stream?.flush?.();
+    } catch {}
   }
 
   disconnect() {
