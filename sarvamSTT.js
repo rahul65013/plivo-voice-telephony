@@ -179,183 +179,105 @@
 
 
 
-const WebSocket = require("ws");
+const { SarvamAIClient } = require("sarvamai");
 const logger = require("./logger");
 
 class SarvamSTT {
   constructor({ callUUID, apiKey, language, onTranscript, onVAD, onError }) {
     this.callUUID = callUUID;
-    this.apiKey = apiKey;
+
+    this.client = new SarvamAIClient({
+      apiSubscriptionKey: apiKey,
+    });
+
     this.language = language || "en-IN";
 
     this.onTranscript = onTranscript || (() => {});
     this.onVAD = onVAD || (() => {});
-    this.onError = onError || ((e) => logger.error(`STT error: ${e.message}`));
+    this.onError = onError || (() => logger.error("STT error"));
 
-    this.ws = null;
-    this.isReady = false;
-
+    this.stream = null;
     this.audioQueue = [];
-    this.reconnectCount = 0;
-    this.MAX_RECONNECTS = 3;
-
-    this.destroyed = false;
-    this.audioSentCount = 0;
+    this.ready = false;
   }
 
-  connect() {
-    return new Promise((resolve, reject) => {
-      if (this.destroyed) return reject(new Error("Instance destroyed"));
+  async connect() {
+    try {
+      logger.info(`[${this.callUUID}] Connecting Sarvam SDK stream...`);
 
-      const params = new URLSearchParams({
+      // 🔥 SDK handles WS internally
+      this.stream = await this.client.speechToText.streaming.connect({
         model: "saaras:v3",
         mode: "transcribe",
         language_code: this.language,
-        sample_rate: "8000",
-        input_audio_codec: "pcm_s16le", // ✅ IMPORTANT
-        high_vad_sensitivity: "true",
-        vad_signals: "true",
+        sample_rate: 8000,
+        vad_signals: true,
+        high_vad_sensitivity: true,
       });
 
-      const url = `wss://api.sarvam.ai/v1/speech-to-text/ws?${params}`;
+      this.ready = true;
 
-      logger.info(`[${this.callUUID}] Sarvam STT → ${url}`);
+      logger.info(`[${this.callUUID}] Sarvam stream OPEN`);
 
-      this.ws = new WebSocket(url, {
-        headers: {
-          "Api-Subscription-Key": this.apiKey,
-        },
-      });
+      // Listen to events
+      this.stream.on("data", (msg) => {
+        logger.info(`[${this.callUUID}] Sarvam →`, msg);
 
-      let resolved = false;
-      const done = (err) => {
-        if (resolved) return;
-        resolved = true;
-        err ? reject(err) : resolve();
-      };
-
-      this.ws.on("open", () => {
-        logger.info(`[${this.callUUID}] ✅ Sarvam WS open`);
-        this.isReady = true;
-        this.reconnectCount = 0;
-
-        // flush queued audio
-        for (const chunk of this.audioQueue) {
-          this._sendAudio(chunk);
+        if (msg.type === "transcript") {
+          const text = msg.transcript?.trim();
+          if (text) this.onTranscript(text);
         }
-        this.audioQueue = [];
 
-        done();
-      });
+        if (msg.type === "speech_start") {
+          this.onVAD("START_SPEECH");
+        }
 
-      this.ws.on("message", (data) => {
-        const raw = data.toString();
-        logger.info(`[${this.callUUID}] Sarvam ← ${raw}`);
-
-        try {
-          const msg = JSON.parse(raw);
-
-          switch (msg.type) {
-            case "transcript":
-              if (msg.transcript?.trim()) {
-                this.onTranscript(msg.transcript.trim());
-              }
-              break;
-
-            case "speech_start":
-              this.onVAD("START_SPEECH");
-              break;
-
-            case "speech_end":
-              this.onVAD("END_SPEECH");
-              break;
-
-            default:
-              break;
-          }
-        } catch (e) {
-          logger.warn(`[${this.callUUID}] Non-JSON: ${raw}`);
+        if (msg.type === "speech_end") {
+          this.onVAD("END_SPEECH");
         }
       });
 
-      this.ws.on("error", (err) => {
-        logger.error(`[${this.callUUID}] WS error: ${err.message}`);
+      this.stream.on("error", (err) => {
+        logger.error(`[${this.callUUID}] STT error: ${err.message}`);
         this.onError(err);
-        this.isReady = false;
-        done(err);
       });
 
-      this.ws.on("close", (code, reason) => {
-        logger.warn(
-          `[${this.callUUID}] WS closed code=${code} reason=${reason?.toString()}`,
-        );
-
-        this.isReady = false;
-
-        if (
-          !this.destroyed &&
-          code === 1006 &&
-          this.reconnectCount < this.MAX_RECONNECTS
-        ) {
-          const delay = Math.min(300 * 2 ** this.reconnectCount, 4000);
-          this.reconnectCount++;
-
-          logger.warn(
-            `[${this.callUUID}] Reconnecting in ${delay}ms (${this.reconnectCount})`,
-          );
-
-          setTimeout(() => this.connect().catch(this.onError), delay);
-        }
-
-        done();
-      });
-    });
+      // flush queued audio
+      for (const chunk of this.audioQueue) {
+        this.sendAudio(chunk);
+      }
+      this.audioQueue = [];
+    } catch (err) {
+      logger.error(`[${this.callUUID}] Connect failed: ${err.message}`);
+      this.onError(err);
+    }
   }
 
-  // ✅ SAFE AUDIO SENDER (IMPORTANT FIX)
+  // 🔥 Send PCM audio (from Plivo after μ-law decode)
   sendAudio(pcmBuffer) {
-    if (this.destroyed) return;
-
-    if (!this.isReady || this.ws?.readyState !== WebSocket.OPEN) {
+    if (!this.ready || !this.stream) {
       this.audioQueue.push(pcmBuffer);
       return;
     }
 
-    this.audioSentCount++;
-
-    this._sendAudio(pcmBuffer);
-  }
-
-  _sendAudio(pcmBuffer) {
-    // 🔥 KEY FIX: ALWAYS send JSON, NOT raw binary
-    const payload = {
-      audio: {
-        data: pcmBuffer.toString("base64"),
-        encoding: "pcm_s16le",
-        sample_rate: "8000",
-      },
-    };
-
-    this.ws.send(JSON.stringify(payload));
-
-    if (this.audioSentCount === 1) {
-      logger.info(`[${this.callUUID}] 🎙 First audio frame sent`);
+    try {
+      this.stream.send(pcmBuffer);
+    } catch (err) {
+      logger.error(`[${this.callUUID}] sendAudio error: ${err.message}`);
     }
   }
 
   flush() {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "flush" }));
-    }
+    try {
+      this.stream?.send(JSON.stringify({ type: "flush" }));
+    } catch (e) {}
   }
 
   disconnect() {
-    this.destroyed = true;
-    this.flush();
-    this.ws?.close(1000, "Call ended");
-    this.ws = null;
-    this.isReady = false;
-    this.audioQueue = [];
+    logger.info(`[${this.callUUID}] Disconnecting Sarvam`);
+    this.stream?.close?.();
+    this.stream = null;
+    this.ready = false;
   }
 }
 

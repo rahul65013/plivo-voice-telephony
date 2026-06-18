@@ -164,125 +164,82 @@
 const SarvamSTT = require("./sarvamSTT");
 const logger = require("./logger");
 
-const MULAW_DECODE_TABLE = (() => {
-  const table = new Int16Array(256);
-  for (let i = 0; i < 256; i++) {
-    let u = ~i & 0xff;
-    const sign = u & 0x80 ? -1 : 1;
-    const exp = (u >> 4) & 0x07;
-    const mant = u & 0x0f;
-    let sample = ((mant << 1) + 33) << exp;
-    sample -= 33;
-    table[i] = sign * sample;
-  }
-  return table;
-})();
-
-function mulawBase64ToPcm16(base64) {
-  const mulaw = Buffer.from(base64, "base64");
-  const pcm = Buffer.allocUnsafe(mulaw.length * 2);
-
-  for (let i = 0; i < mulaw.length; i++) {
-    pcm.writeInt16LE(MULAW_DECODE_TABLE[mulaw[i]], i * 2);
-  }
-
-  return pcm;
-}
-
 class CallSession {
   constructor({ callUUID, sarvamApiKey, language, onTranscriptReady }) {
     this.callUUID = callUUID;
-    this.apiKey = sarvamApiKey;
     this.language = language || "en-IN";
+
     this.onTranscriptReady = onTranscriptReady;
 
     this.stt = null;
     this.segments = [];
+    this.isSpeaking = false;
     this.flushTimer = null;
-    this.ended = false;
-
-    this.chunkCount = 0;
   }
 
   async start() {
     this.stt = new SarvamSTT({
       callUUID: this.callUUID,
-      apiKey: this.apiKey,
+      apiKey: process.env.SARVAM_API_KEY,
       language: this.language,
+
       onTranscript: (text) => this._onSegment(text),
       onVAD: (sig) => this._onVAD(sig),
       onError: (err) => logger.error(err),
     });
 
     await this.stt.connect();
-
-    logger.info(`[${this.callUUID}] STT ready`);
   }
 
-  handleAudioChunk(base64Payload) {
-    if (!base64Payload || this.ended) return;
-
-    this.chunkCount++;
-
-    const pcm = mulawBase64ToPcm16(base64Payload);
-
-    this.stt.sendAudio(pcm);
+  handleAudioChunk(pcmBuffer) {
+    if (!this.stt) return;
+    this.stt.sendAudio(pcmBuffer);
   }
 
   _onVAD(signal) {
     logger.info(`[${this.callUUID}] VAD: ${signal}`);
 
     if (signal === "START_SPEECH") {
+      this.isSpeaking = true;
       this._cancelFlush();
     }
 
     if (signal === "END_SPEECH") {
+      this.isSpeaking = false;
       this._scheduleFlush();
     }
   }
 
   _onSegment(text) {
+    logger.info(`[${this.callUUID}] Transcript: ${text}`);
     this.segments.push(text);
     this._scheduleFlush();
   }
 
   _scheduleFlush() {
     this._cancelFlush();
-
     this.flushTimer = setTimeout(() => {
-      this._fire();
-    }, 1500);
+      const full = this.segments.join(" ").trim();
+      this.segments = [];
+
+      if (full) {
+        logger.info(`[FINAL]: ${full}`);
+        this.onTranscriptReady(full);
+      }
+    }, 1200);
   }
 
   _cancelFlush() {
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = null;
-    }
-  }
-
-  _fire() {
-    if (!this.segments.length) return;
-
-    const full = this.segments.join(" ").trim();
-    this.segments = [];
-
-    logger.info(`\n===== UTTERANCE =====`);
-    logger.info(full);
-
-    this.onTranscriptReady(full);
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
   }
 
   async end() {
-    if (this.ended) return;
-    this.ended = true;
-
     this._cancelFlush();
-    this._fire();
+    const full = this.segments.join(" ");
+    if (full) this.onTranscriptReady(full);
 
     this.stt?.disconnect();
-
-    logger.info(`[${this.callUUID}] Call ended`);
   }
 }
 
