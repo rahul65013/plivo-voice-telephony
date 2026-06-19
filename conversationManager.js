@@ -247,7 +247,7 @@ class ConversationManager {
       //   body:    JSON.stringify({ transcript, language: this.language }),
       body: JSON.stringify({
         text: transcript,
-        projectUrl: "vajrawestcity-kollur-neopolis-hyderabad-vajra-656189",
+        projectUrl: "voice-ai-telephony-demo",
         sessionId: "64eca96b-9a54-41ad-971f-ff5873e0e7f4",
         language: this.language,
       }),
