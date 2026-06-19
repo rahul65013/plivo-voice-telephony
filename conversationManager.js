@@ -1,4 +1,3 @@
-
 // /**
 //  * conversationManager.js
 //  *
@@ -127,8 +126,6 @@
 
 // module.exports = ConversationManager;
 
-
-
 /**
  * conversationManager.js
  *
@@ -181,12 +178,19 @@ function detectLanguage(transcript) {
 // ── Static audio URLs — put in .env or replace inline ────────────────────────
 const AUDIO = {
   languageConfirmed: {
-    en: process.env.AUDIO_CONFIRMED_EN || "https://YOUR_CDN/confirmed_english.wav",
-    te: process.env.AUDIO_CONFIRMED_TE || "https://YOUR_CDN/confirmed_telugu.wav",
+    en:
+      process.env.AUDIO_CONFIRMED_EN ||
+      "https://YOUR_CDN/confirmed_english.wav",
+    te:
+      process.env.AUDIO_CONFIRMED_TE || "https://YOUR_CDN/confirmed_telugu.wav",
   },
   didNotUnderstand: {
-    en: process.env.AUDIO_NOT_UNDERSTOOD_EN || "https://YOUR_CDN/not_understood_en.wav",
-    te: process.env.AUDIO_NOT_UNDERSTOOD_TE || "https://YOUR_CDN/not_understood_te.wav",
+    en:
+      process.env.AUDIO_NOT_UNDERSTOOD_EN ||
+      "https://YOUR_CDN/not_understood_en.wav",
+    te:
+      process.env.AUDIO_NOT_UNDERSTOOD_TE ||
+      "https://YOUR_CDN/not_understood_te.wav",
   },
 };
 
@@ -195,26 +199,33 @@ const TURN = { LANGUAGE_SELECT: "LANGUAGE_SELECT", MAIN: "MAIN" };
 class ConversationManager {
   constructor(callUUID) {
     this.callUUID = callUUID;
-    this.turn     = TURN.LANGUAGE_SELECT;
+    this.turn = TURN.LANGUAGE_SELECT;
     this.language = null; // "en" | "te"
   }
 
   async handleTranscript(transcript) {
-    logger.info(`[${this.callUUID}][Conv] Turn: ${this.turn} | "${transcript}"`);
+    logger.info(
+      `[${this.callUUID}][Conv] Turn: ${this.turn} | "${transcript}"`,
+    );
 
     // ── Turn 1: detect language ───────────────────────────────────────────
     if (this.turn === TURN.LANGUAGE_SELECT) {
       const detected = detectLanguage(transcript);
 
       if (!detected) {
-        logger.info(`[${this.callUUID}][Conv] Language not detected, re-asking`);
+        logger.info(
+          `[${this.callUUID}][Conv] Language not detected, re-asking`,
+        );
         return { audioUrl: AUDIO.didNotUnderstand.en, language: null };
       }
 
       this.language = detected;
-      this.turn     = TURN.MAIN;
+      this.turn = TURN.MAIN;
       logger.info(`[${this.callUUID}][Conv] Language confirmed → ${detected}`);
-      return { audioUrl: AUDIO.languageConfirmed[detected], language: detected };
+      return {
+        audioUrl: AUDIO.languageConfirmed[detected],
+        language: detected,
+      };
     }
 
     // ── Turn 2+: translate if Telugu → RAG → audio ────────────────────────
@@ -249,17 +260,17 @@ class ConversationManager {
    */
   async _translate(text, from, to) {
     const res = await fetch(SARVAM_TRANSLATE_URL, {
-      method:  "POST",
+      method: "POST",
       headers: {
-        "Content-Type":        "application/json",
+        "Content-Type": "application/json",
         "api-subscription-key": process.env.SARVAM_API_KEY,
       },
       body: JSON.stringify({
-        input:                  text,
-        source_language_code:   from,
-        target_language_code:   to,
-        mode:                   "formal",       // formal | informal | code-mixed
-        model:                  "mayura:v1",    // or "sarvam-translate:v1" for all 22 langs
+        input: text,
+        source_language_code: from,
+        target_language_code: to,
+        mode: "formal", // formal | informal | code-mixed
+        model: "mayura:v1", // or "sarvam-translate:v1" for all 22 langs
       }),
     });
 
@@ -284,11 +295,12 @@ class ConversationManager {
    */
   async _callRag(englishTranscript) {
     const res = await fetch(process.env.RAG_API_URL, {
-      method:  "POST",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        transcript: englishTranscript,  // always English
-        language:   this.language,      // "en" or "te" — for TTS on your side
+        transcript: englishTranscript, // always English
+        language: this.language, // "en" or "te" — for TTS on your side
+        projectUrl: "voice-ai-telephony-demo",
       }),
     });
 
