@@ -278,8 +278,6 @@
 //   process.exit(0);
 // });
 
-
-
 /**
  * server.js
  *
@@ -292,50 +290,292 @@
  *   6. Repeat from step 3
  */
 
+// require("dotenv").config();
+
+// const http               = require("http");
+// const WebSocket          = require("ws");
+// const express            = require("express");
+// const plivo              = require("plivo");
+// const CallSession        = require("./callSession");
+// const ConversationManager = require("./conversationManager.js");
+// const logger             = require("./logger");
+
+// // ── Env validation ────────────────────────────────────────────────────────────
+// const REQUIRED = ["PLIVO_AUTH_ID", "PLIVO_AUTH_TOKEN", "PLIVO_FROM_NUMBER", "SARVAM_API_KEY", "SERVER_BASE_URL"];
+// const missing  = REQUIRED.filter((k) => !process.env[k]);
+// if (missing.length) { logger.error(`Missing env vars: ${missing.join(", ")}`); process.exit(1); }
+
+// const PORT          = parseInt(process.env.PORT || "8080", 10);
+// const BASE_URL      = process.env.SERVER_BASE_URL.replace(/\/$/, "");
+// const LANGUAGE      = process.env.SARVAM_LANGUAGE || "en-IN";
+// const GREETING_TEXT = process.env.GREETING_TEXT   || "Hello! How can I help you today?";
+// const WS_STREAM_URL = BASE_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/stream";
+
+// const plivoClient = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN);
+
+// // ── Express ───────────────────────────────────────────────────────────────────
+// const app = express();
+// app.use(express.urlencoded({ extended: true }));
+// app.use(express.json());
+
+// app.get("/health", (_req, res) =>
+//   res.json({ status: "ok", uptime: process.uptime().toFixed(0) + "s" })
+// );
+
+// /**
+//  * /answer — called by Plivo when callee picks up.
+//  *
+//  * Plays the greeting then opens a bidirectional audio stream.
+//  * keepCallAlive="true" keeps the call alive while the WS is open.
+//  */
+// app.all("/answer", (_req, res) => {
+//   logger.info(`[HTTP] /answer`);
+
+//   const xml = `<?xml version="1.0" encoding="UTF-8"?>
+// <Response>
+//   <Play>https://sgjarvismedia.showmyflat.com/voice-ai/pitch_intro_call.wav</Play>
+//   <Stream
+//     bidirectional="true"
+//     keepCallAlive="true"
+//     contentType="audio/x-mulaw;rate=8000">
+//     ${WS_STREAM_URL}
+//   </Stream>
+// </Response>`;
+
+//   res.set("Content-Type", "text/xml").send(xml);
+// });
+
+// app.post("/hangup", (req, res) => {
+//   logger.info(`[HTTP] /hangup — ${req.body?.CallUUID}`);
+//   res.sendStatus(200);
+// });
+
+// app.post("/make-call", async (req, res) => {
+//   const { toNumber } = req.body;
+//   if (!toNumber) return res.status(400).json({ error: "toNumber required" });
+
+//   try {
+//     const result = await plivoClient.calls.create(
+//       process.env.PLIVO_FROM_NUMBER, toNumber, `${BASE_URL}/answer`,
+//       { answerMethod: "POST", hangupUrl: `${BASE_URL}/hangup`, hangupMethod: "POST" }
+//     );
+//     logger.info(`[MAKE_CALL] Success — ${result.requestUuid}`);
+//     res.json(result);
+//   } catch (err) {
+//     logger.error(`[MAKE_CALL] ${err.message}`);
+//     res.status(500).json({ error: err.message });
+//   }
+// });
+
+// // ── WebSocket /stream ─────────────────────────────────────────────────────────
+// const httpServer = http.createServer(app);
+// const wss        = new WebSocket.Server({ server: httpServer, path: "/stream" });
+
+// // Silent μ-law frame — keeps Plivo from timing out the stream
+// const MULAW_SILENCE = Buffer.alloc(160, 0xff);
+
+// wss.on("connection", (ws, req) => {
+//   logger.info(`[WS] Connected from ${req.socket.remoteAddress}`);
+
+//   let session  = null;   // CallSession
+//   let conv     = null;   // ConversationManager
+//   let callUUID = null;
+//   let chunkCount = 0;
+//   let keepAlive  = null;
+//   let isPlayingAudio = false; // prevent overlapping playback
+
+//   const startKeepAlive = () => {
+//     keepAlive = setInterval(() => {
+//       if (ws.readyState === WebSocket.OPEN) {
+//         ws.send(JSON.stringify({
+//           event: "playAudio",
+//           media: { contentType: "audio/x-mulaw;rate=8000", sampleRate: 8000, payload: MULAW_SILENCE.toString("base64") },
+//         }));
+//       }
+//     }, 5000);
+//   };
+
+//   const stopKeepAlive = () => { clearInterval(keepAlive); keepAlive = null; };
+
+//   /**
+//    * Play an audio URL on the live call using Plivo's REST API.
+//    * Uses play_audio which streams the URL directly into the call.
+//    */
+//   const playAudioUrl = async (audioUrl) => {
+//     if (!audioUrl || !callUUID) return;
+//     if (isPlayingAudio) {
+//       logger.warn(`[${callUUID}] Already playing — skipping`);
+//       return;
+//     }
+//     isPlayingAudio = true;
+//     try {
+//       logger.info(`[${callUUID}] 🔊 Playing: ${audioUrl}`);
+//       await plivoClient.calls.play(callUUID, audioUrl); // ← fix here
+//     } catch (err) {
+//       logger.error(`[${callUUID}] play error: ${err.message}`);
+//     } finally {
+//       setTimeout(() => {
+//         isPlayingAudio = false;
+//       }, 3000);
+//     }
+//   };
+
+//   ws.on("message", async (raw) => {
+//     let msg;
+//     try { msg = JSON.parse(raw.toString()); } catch { return; }
+
+//     switch (msg.event) {
+
+//       // ── Stream opened ───────────────────────────────────────────────────
+//       case "start": {
+//         callUUID = msg.start?.callId || msg.start?.streamSid || `call-${Date.now()}`;
+//         logger.info(`[WS] START — callUUID: ${callUUID}`);
+//         logger.info(`[WS] Format: ${JSON.stringify(msg.start?.mediaFormat)}`);
+
+//         conv = new ConversationManager(callUUID);
+
+//         session = new CallSession({
+//           callUUID,
+//           sarvamApiKey:       process.env.SARVAM_API_KEY,
+//           language:           LANGUAGE,
+//           onTranscriptReady:  (transcript) => onTranscript(transcript),
+//         });
+
+//         await session.start();
+//         startKeepAlive();
+
+//         // Play the language-selection prompt right after the greeting
+//         await playAudioUrl(conv.getLanguagePromptUrl());
+
+//         logger.info(`[WS] Session ready ✅`);
+//         break;
+//       }
+
+//       // ── Audio chunk from caller ─────────────────────────────────────────
+//       case "media": {
+//         if (!session || !msg.media?.payload) return;
+//         chunkCount++;
+//         if (chunkCount === 1)         logger.info(`[WS] First audio chunk`);
+//         if (chunkCount % 500 === 0)   logger.info(`[WS] Chunks: ${chunkCount}`);
+//         session.handleAudioChunk(msg.media.payload);
+//         break;
+//       }
+
+//       // ── Call ended ──────────────────────────────────────────────────────
+//       case "stop": {
+//         logger.info(`[WS] STOP — total chunks: ${chunkCount}`);
+//         stopKeepAlive();
+//         if (session) { await session.end(); session = null; }
+//         break;
+//       }
+
+//       default:
+//         // "incorrectPayload" and other Plivo housekeeping events — ignore silently
+//         break;
+//     }
+//   });
+
+//   ws.on("close", () => {
+//     logger.info(`[WS] Connection closed`);
+//     stopKeepAlive();
+//     session?.end().catch(() => {});
+//     session = null;
+//   });
+
+//   ws.on("error", (err) => {
+//     logger.error(`[WS] Error: ${err.message}`);
+//     stopKeepAlive();
+//   });
+
+//   // ── Transcript handler ────────────────────────────────────────────────────
+//   async function onTranscript(transcript) {
+//     logger.info(`\n${"─".repeat(60)}`);
+//     logger.info(`[TRANSCRIPT] "${transcript}"`);
+//     logger.info(`${"─".repeat(60)}\n`);
+
+//     if (!conv) return;
+
+//     try {
+//       const { audioUrl, language } = await conv.handleTranscript(transcript);
+
+//       if (language) logger.info(`[CONV] Language in use: ${language}`);
+//       if (audioUrl) await playAudioUrl(audioUrl);
+//     } catch (err) {
+//       logger.error(`[TRANSCRIPT] Handler error: ${err.message}`);
+//     }
+//   }
+// });
+
+// // ── Utils ─────────────────────────────────────────────────────────────────────
+// function escapeXml(str) {
+//   return str
+//     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+//     .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+// }
+
+// // ── Start ─────────────────────────────────────────────────────────────────────
+// httpServer.listen(PORT, "0.0.0.0", () => {
+//   logger.info(`\n🚀 Server running on port ${PORT}`);
+//   logger.info(`   Answer : ${BASE_URL}/answer`);
+//   logger.info(`   Stream : ${WS_STREAM_URL}`);
+// });
+
+// process.on("SIGINT", () => { logger.info(`Shutting down`); process.exit(0); });
+
 require("dotenv").config();
 
-const http               = require("http");
-const WebSocket          = require("ws");
-const express            = require("express");
-const plivo              = require("plivo");
-const CallSession        = require("./callSession");
-const ConversationManager = require("./conversationManager.js");
-const logger             = require("./logger");
+const http = require("http");
+const WebSocket = require("ws");
+const express = require("express");
+const plivo = require("plivo");
+const CallSession = require("./callSession");
+const ConversationManager = require("./conversationManager");
+const logger = require("./logger");
 
-// ── Env validation ────────────────────────────────────────────────────────────
-const REQUIRED = ["PLIVO_AUTH_ID", "PLIVO_AUTH_TOKEN", "PLIVO_FROM_NUMBER", "SARVAM_API_KEY", "SERVER_BASE_URL"];
-const missing  = REQUIRED.filter((k) => !process.env[k]);
-if (missing.length) { logger.error(`Missing env vars: ${missing.join(", ")}`); process.exit(1); }
+const REQUIRED = [
+  "PLIVO_AUTH_ID",
+  "PLIVO_AUTH_TOKEN",
+  "PLIVO_FROM_NUMBER",
+  "SARVAM_API_KEY",
+  "SERVER_BASE_URL",
+  "GREETING_AUDIO_URL",
+];
+const missing = REQUIRED.filter((k) => !process.env[k]);
+if (missing.length) {
+  logger.error(`Missing env vars: ${missing.join(", ")}`);
+  process.exit(1);
+}
 
-const PORT          = parseInt(process.env.PORT || "8080", 10);
-const BASE_URL      = process.env.SERVER_BASE_URL.replace(/\/$/, "");
-const LANGUAGE      = process.env.SARVAM_LANGUAGE || "en-IN";
-const GREETING_TEXT = process.env.GREETING_TEXT   || "Hello! How can I help you today?";
-const WS_STREAM_URL = BASE_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/stream";
+const PORT = parseInt(process.env.PORT || "8080", 10);
+const BASE_URL = process.env.SERVER_BASE_URL.replace(/\/$/, "");
+const LANGUAGE = process.env.SARVAM_LANGUAGE || "en-IN";
+const GREETING_AUDIO_URL = process.env.GREETING_AUDIO_URL; // your wav/mp3 with greeting + language question
+const WS_STREAM_URL =
+  BASE_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/stream";
 
-const plivoClient = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN);
+const plivoClient = new plivo.Client(
+  process.env.PLIVO_AUTH_ID,
+  process.env.PLIVO_AUTH_TOKEN,
+);
 
-// ── Express ───────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 app.get("/health", (_req, res) =>
-  res.json({ status: "ok", uptime: process.uptime().toFixed(0) + "s" })
+  res.json({ status: "ok", uptime: process.uptime().toFixed(0) + "s" }),
 );
 
 /**
- * /answer — called by Plivo when callee picks up.
- *
- * Plays the greeting then opens a bidirectional audio stream.
- * keepCallAlive="true" keeps the call alive while the WS is open.
+ * /answer — plays greeting audio (which already includes the language question),
+ * then opens the bidirectional stream to receive caller audio.
  */
 app.all("/answer", (_req, res) => {
   logger.info(`[HTTP] /answer`);
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Speak voice="Polly.Aditi" language="en-IN">${escapeXml(GREETING_TEXT)}</Speak>
+  <Play>${GREETING_AUDIO_URL}</Play>
   <Stream
     bidirectional="true"
     keepCallAlive="true"
@@ -344,6 +584,7 @@ app.all("/answer", (_req, res) => {
   </Stream>
 </Response>`;
 
+  logger.info(`[HTTP] XML:\n${xml}`);
   res.set("Content-Type", "text/xml").send(xml);
 });
 
@@ -358,8 +599,14 @@ app.post("/make-call", async (req, res) => {
 
   try {
     const result = await plivoClient.calls.create(
-      process.env.PLIVO_FROM_NUMBER, toNumber, `${BASE_URL}/answer`,
-      { answerMethod: "POST", hangupUrl: `${BASE_URL}/hangup`, hangupMethod: "POST" }
+      process.env.PLIVO_FROM_NUMBER,
+      toNumber,
+      `${BASE_URL}/answer`,
+      {
+        answerMethod: "POST",
+        hangupUrl: `${BASE_URL}/hangup`,
+        hangupMethod: "POST",
+      },
     );
     logger.info(`[MAKE_CALL] Success — ${result.requestUuid}`);
     res.json(result);
@@ -371,38 +618,42 @@ app.post("/make-call", async (req, res) => {
 
 // ── WebSocket /stream ─────────────────────────────────────────────────────────
 const httpServer = http.createServer(app);
-const wss        = new WebSocket.Server({ server: httpServer, path: "/stream" });
+const wss = new WebSocket.Server({ server: httpServer, path: "/stream" });
 
-// Silent μ-law frame — keeps Plivo from timing out the stream
 const MULAW_SILENCE = Buffer.alloc(160, 0xff);
 
 wss.on("connection", (ws, req) => {
   logger.info(`[WS] Connected from ${req.socket.remoteAddress}`);
 
-  let session  = null;   // CallSession
-  let conv     = null;   // ConversationManager
+  let session = null;
+  let conv = null;
   let callUUID = null;
   let chunkCount = 0;
-  let keepAlive  = null;
-  let isPlayingAudio = false; // prevent overlapping playback
+  let keepAlive = null;
+  let isPlayingAudio = false;
 
   const startKeepAlive = () => {
     keepAlive = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          event: "playAudio",
-          media: { contentType: "audio/x-mulaw;rate=8000", sampleRate: 8000, payload: MULAW_SILENCE.toString("base64") },
-        }));
+        ws.send(
+          JSON.stringify({
+            event: "playAudio",
+            media: {
+              contentType: "audio/x-mulaw;rate=8000",
+              sampleRate: 8000,
+              payload: MULAW_SILENCE.toString("base64"),
+            },
+          }),
+        );
       }
     }, 5000);
   };
 
-  const stopKeepAlive = () => { clearInterval(keepAlive); keepAlive = null; };
+  const stopKeepAlive = () => {
+    clearInterval(keepAlive);
+    keepAlive = null;
+  };
 
-  /**
-   * Play an audio URL on the live call using Plivo's REST API.
-   * Uses play_audio which streams the URL directly into the call.
-   */
   const playAudioUrl = async (audioUrl) => {
     if (!audioUrl || !callUUID) return;
     if (isPlayingAudio) {
@@ -412,68 +663,67 @@ wss.on("connection", (ws, req) => {
     isPlayingAudio = true;
     try {
       logger.info(`[${callUUID}] 🔊 Playing: ${audioUrl}`);
-      await plivoClient.calls.playAudio(callUUID, { urls: audioUrl });
+      await plivoClient.calls.play(callUUID, audioUrl);
     } catch (err) {
-      logger.error(`[${callUUID}] playAudio error: ${err.message}`);
+      logger.error(`[${callUUID}] play error: ${err.message}`);
     } finally {
-      // Give audio time to play before accepting next input
-      // Adjust delay based on your audio clip length
-      setTimeout(() => { isPlayingAudio = false; }, 3000);
+      setTimeout(() => {
+        isPlayingAudio = false;
+      }, 3000);
     }
   };
 
   ws.on("message", async (raw) => {
     let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
 
     switch (msg.event) {
-
-      // ── Stream opened ───────────────────────────────────────────────────
       case "start": {
-        callUUID = msg.start?.callId || msg.start?.streamSid || `call-${Date.now()}`;
+        callUUID =
+          msg.start?.callId || msg.start?.streamSid || `call-${Date.now()}`;
         logger.info(`[WS] START — callUUID: ${callUUID}`);
-        logger.info(`[WS] Format: ${JSON.stringify(msg.start?.mediaFormat)}`);
 
         conv = new ConversationManager(callUUID);
-
         session = new CallSession({
           callUUID,
-          sarvamApiKey:       process.env.SARVAM_API_KEY,
-          language:           LANGUAGE,
-          onTranscriptReady:  (transcript) => onTranscript(transcript),
+          sarvamApiKey: process.env.SARVAM_API_KEY,
+          language: LANGUAGE,
+          onTranscriptReady: (transcript) => onTranscript(transcript),
         });
 
         await session.start();
         startKeepAlive();
-
-        // Play the language-selection prompt right after the greeting
-        await playAudioUrl(conv.getLanguagePromptUrl());
-
+        // No extra audio to play here — greeting + language question
+        // was already played by <Play> in the /answer XML before stream opened
         logger.info(`[WS] Session ready ✅`);
         break;
       }
 
-      // ── Audio chunk from caller ─────────────────────────────────────────
       case "media": {
         if (!session || !msg.media?.payload) return;
         chunkCount++;
-        if (chunkCount === 1)         logger.info(`[WS] First audio chunk`);
-        if (chunkCount % 500 === 0)   logger.info(`[WS] Chunks: ${chunkCount}`);
+        if (chunkCount === 1) logger.info(`[WS] First audio chunk`);
+        if (chunkCount % 500 === 0) logger.info(`[WS] Chunks: ${chunkCount}`);
         session.handleAudioChunk(msg.media.payload);
         break;
       }
 
-      // ── Call ended ──────────────────────────────────────────────────────
       case "stop": {
         logger.info(`[WS] STOP — total chunks: ${chunkCount}`);
         stopKeepAlive();
-        if (session) { await session.end(); session = null; }
+        if (session) {
+          await session.end();
+          session = null;
+        }
         break;
       }
 
       default:
-        // "incorrectPayload" and other Plivo housekeeping events — ignore silently
-        break;
+        break; // ignore "incorrectPayload" and other housekeeping events
     }
   });
 
@@ -489,7 +739,6 @@ wss.on("connection", (ws, req) => {
     stopKeepAlive();
   });
 
-  // ── Transcript handler ────────────────────────────────────────────────────
   async function onTranscript(transcript) {
     logger.info(`\n${"─".repeat(60)}`);
     logger.info(`[TRANSCRIPT] "${transcript}"`);
@@ -499,8 +748,7 @@ wss.on("connection", (ws, req) => {
 
     try {
       const { audioUrl, language } = await conv.handleTranscript(transcript);
-
-      if (language) logger.info(`[CONV] Language in use: ${language}`);
+      if (language) logger.info(`[CONV] Language: ${language}`);
       if (audioUrl) await playAudioUrl(audioUrl);
     } catch (err) {
       logger.error(`[TRANSCRIPT] Handler error: ${err.message}`);
@@ -508,18 +756,14 @@ wss.on("connection", (ws, req) => {
   }
 });
 
-// ── Utils ─────────────────────────────────────────────────────────────────────
-function escapeXml(str) {
-  return str
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
-}
-
-// ── Start ─────────────────────────────────────────────────────────────────────
 httpServer.listen(PORT, "0.0.0.0", () => {
   logger.info(`\n🚀 Server running on port ${PORT}`);
-  logger.info(`   Answer : ${BASE_URL}/answer`);
-  logger.info(`   Stream : ${WS_STREAM_URL}`);
+  logger.info(`   Answer  : ${BASE_URL}/answer`);
+  logger.info(`   Stream  : ${WS_STREAM_URL}`);
+  logger.info(`   Greeting: ${GREETING_AUDIO_URL}`);
 });
 
-process.on("SIGINT", () => { logger.info(`Shutting down`); process.exit(0); });
+process.on("SIGINT", () => {
+  logger.info(`Shutting down`);
+  process.exit(0);
+});
