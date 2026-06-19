@@ -240,6 +240,7 @@ class ConversationManager {
    *   { audioUrl: "https://..." }   ← publicly accessible .wav or .mp3
    */
   async _callRag(transcript) {
+    console.log("language", this.language);
     const res = await fetch(process.env.RAG_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
