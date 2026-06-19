@@ -1,42 +1,42 @@
+
 // /**
 //  * conversationManager.js
 //  *
-//  * Manages the conversation state for one call:
-//  *   - Tracks which "turn" we're on (greeting → language-select → main loop)
-//  *   - Detects the language the user wants from their first reply
-//  *   - Returns the correct audio URL for each turn
+//  * Turn 1 — LANGUAGE_SELECT:
+//  *   User replies to the greeting (which already asked "English or Telugu?")
+//  *   We detect the language from their answer and play the confirmation audio URL.
 //  *
-//  * AUDIO URL MAP — replace the dummy URLs with your real ones.
-//  * Each value is a publicly accessible .wav or .mp3 URL that Plivo can fetch.
+//  * Turn 2+ — MAIN:
+//  *   Every transcript goes to your RAG API.
+//  *   RAG returns { audioUrl } which we play back.
 //  */
 
 // const logger = require("./logger");
 
-// // ── Dummy audio URLs — swap these for real ones ──────────────────────────────
+// // ── Static audio URLs ─────────────────────────────────────────────────────────
+// // Replace these with your actual hosted .wav / .mp3 URLs.
+// // Plivo fetches them directly so they must be publicly accessible.
 // const AUDIO = {
-//   // Played right after greeting while stream is open
-//   // "Please say English or Telugu to choose your language"
-//   languagePrompt: {
-//     en: "https://your-cdn.com/audio/choose_language_en.wav",
-//     te: "https://your-cdn.com/audio/choose_language_te.wav",
-//   },
-
-//   // Confirmation after language is chosen
 //   languageConfirmed: {
-//     en: "https://your-cdn.com/audio/got_it_english.wav",
-//     te: "https://your-cdn.com/audio/got_it_telugu.wav",
+//     en:
+//       process.env.AUDIO_CONFIRMED_EN ||
+//       "https://YOUR_CDN/confirmed_english.wav",
+//     te:
+//       process.env.AUDIO_CONFIRMED_TE || "https://YOUR_CDN/confirmed_telugu.wav",
 //   },
-
-//   // Fallback when we don't understand
 //   didNotUnderstand: {
-//     en: "https://your-cdn.com/audio/sorry_didnt_understand_en.wav",
-//     te: "https://your-cdn.com/audio/sorry_didnt_understand_te.wav",
+//     en:
+//       process.env.AUDIO_NOT_UNDERSTOOD_EN ||
+//       "https://YOUR_CDN/not_understood_en.wav",
+//     te:
+//       process.env.AUDIO_NOT_UNDERSTOOD_TE ||
+//       "https://YOUR_CDN/not_understood_te.wav",
 //   },
 // };
 
-// // ── Language detection keywords ───────────────────────────────────────────────
+// // ── Language detection ────────────────────────────────────────────────────────
 // const LANG_KEYWORDS = {
-//   en: ["english", "eng", "angrezi"],
+//   en: ["english", "eng", "angrezi", "inglis"],
 //   te: ["telugu", "telgu", "teligi", "తెలుగు"],
 // };
 
@@ -48,129 +48,123 @@
 //   return null;
 // }
 
-// // ── Turns ────────────────────────────────────────────────────────────────────
-// const TURN = {
-//   LANGUAGE_SELECT: "LANGUAGE_SELECT", // waiting for user to pick language
-//   MAIN: "MAIN", // normal RAG conversation
-// };
+// const TURN = { LANGUAGE_SELECT: "LANGUAGE_SELECT", MAIN: "MAIN" };
 
 // class ConversationManager {
 //   constructor(callUUID) {
 //     this.callUUID = callUUID;
 //     this.turn = TURN.LANGUAGE_SELECT;
-//     this.language = null; // "en" | "te" — set after user picks
+//     this.language = null; // "en" | "te"
 //   }
 
 //   /**
-//    * Given the latest transcript, returns:
-//    *   { audioUrl: string, language: string|null, done: boolean }
-//    *
-//    * `done: true` means hang up (not used yet but handy for future).
+//    * Call this with every final transcript.
+//    * Returns { audioUrl: string, language: string|null }
 //    */
 //   async handleTranscript(transcript) {
 //     logger.info(
 //       `[${this.callUUID}][Conv] Turn: ${this.turn} | "${transcript}"`,
 //     );
 
-//     // ── Turn 1: user is choosing their language ───────────────────────────
+//     // ── Turn 1: detect which language the user chose ──────────────────────
 //     if (this.turn === TURN.LANGUAGE_SELECT) {
 //       const detected = detectLanguage(transcript);
 
 //       if (!detected) {
-//         // Couldn't detect — re-ask in both languages (default to EN prompt)
 //         logger.info(
 //           `[${this.callUUID}][Conv] Language not detected, re-asking`,
 //         );
-//         return {
-//           audioUrl: AUDIO.languagePrompt.en, // or play both, your call
-//           language: null,
-//           done: false,
-//         };
+//         // Play "didn't understand" in English (default) and wait for next reply
+//         return { audioUrl: AUDIO.didNotUnderstand.en, language: null };
 //       }
 
-//       // Language confirmed
 //       this.language = detected;
 //       this.turn = TURN.MAIN;
-//       logger.info(`[${this.callUUID}][Conv] Language set → ${detected}`);
+//       logger.info(`[${this.callUUID}][Conv] Language confirmed → ${detected}`);
 //       return {
 //         audioUrl: AUDIO.languageConfirmed[detected],
 //         language: detected,
-//         done: false,
 //       };
 //     }
 
-//     // ── Turn 2+: main RAG conversation ────────────────────────────────────
+//     // ── Turn 2+: send transcript to RAG, get audio URL back ───────────────
 //     if (this.turn === TURN.MAIN) {
-//       const audioUrl = await this._fetchRagAudioUrl(transcript);
-//       return { audioUrl, language: this.language, done: false };
+//       const audioUrl = await this._callRag(transcript);
+//       return { audioUrl, language: this.language };
 //     }
 //   }
 
 //   /**
-//    * Call your RAG/LLM backend here and get back an audio URL.
-//    * Replace the body of this function with your real API call.
+//    * Replace the body of this function with your real RAG API call.
+//    *
+//    * Your RAG endpoint receives:
+//    *   POST { transcript: string, language: "en" | "te" }
+//    *
+//    * Your RAG endpoint must return:
+//    *   { audioUrl: "https://..." }   ← publicly accessible .wav or .mp3
 //    */
-//   async _fetchRagAudioUrl(transcript) {
-//     // TODO: replace with your actual API
-//     // const res  = await fetch(process.env.RAG_API_URL, {
-//     //   method: "POST",
-//     //   headers: { "Content-Type": "application/json" },
-//     //   body: JSON.stringify({ transcript, language: this.language }),
-//     // });
-//     // const { audioUrl } = await res.json();
-//     // return audioUrl;
+//   async _callRag(transcript) {
+//     console.log("language", this.language);
+//     const res = await fetch(process.env.RAG_API_URL, {
+//       method: "POST",
+//       headers: { "Content-Type": "application/json" },
+//       //   body:    JSON.stringify({ transcript, language: this.language }),
+//       body: JSON.stringify({
+//         text: transcript,
+//         projectUrl: "voice-ai-telephony-demo",
+//         sessionId: "64eca96b-9a54-41ad-971f-ff5873e0e7f4",
+//         language: this.language,
+//       }),
+//     });
 
-//     // Dummy: return a static test audio URL
-//     logger.info(
-//       `[${this.callUUID}][Conv] RAG stub — transcript: "${transcript}"`,
-//     );
-//     return "https://your-cdn.com/audio/dummy_response.wav";
-//   }
+//     if (!res.ok) throw new Error(`RAG API error: ${res.status}`);
 
-//   /** First audio to play right after the greeting (before user speaks) */
-//   getLanguagePromptUrl() {
-//     return AUDIO.languagePrompt.en; // plays the bilingual "choose language" prompt
+//     const { audioUrl } = await res.json();
+//     logger.info(`[${this.callUUID}][Conv] RAG audio URL: ${audioUrl}`);
+//     return audioUrl;
 //   }
 // }
 
 // module.exports = ConversationManager;
 
+
+
 /**
  * conversationManager.js
  *
- * Turn 1 — LANGUAGE_SELECT:
- *   User replies to the greeting (which already asked "English or Telugu?")
- *   We detect the language from their answer and play the confirmation audio URL.
+ * Pipeline for Telugu:
+ *   user speaks Telugu
+ *     → Sarvam STT gives Telugu text
+ *     → translate Telugu → English  (Sarvam Translate API)
+ *     → send English text to RAG
+ *     → RAG returns { responseText: "...", audioUrl: "..." }
+ *         if RAG returns audioUrl directly → play it (RAG already did TTS in Telugu)
+ *         if RAG returns only responseText  → translate English → Telugu, then TTS
  *
- * Turn 2+ — MAIN:
- *   Every transcript goes to your RAG API.
- *   RAG returns { audioUrl } which we play back.
+ * Pipeline for English:
+ *   user speaks English
+ *     → Sarvam STT gives English text
+ *     → send directly to RAG (no translation)
+ *     → RAG returns { audioUrl: "..." } → play it
+ *
+ * Sarvam Translate API:
+ *   POST https://api.sarvam.ai/translate
+ *   Headers: api-subscription-key: <key>
+ *   Body: { input, source_language_code, target_language_code, mode, model }
+ *   Response: { translated_text: "..." }
  */
 
 const logger = require("./logger");
 
-// ── Static audio URLs ─────────────────────────────────────────────────────────
-// Replace these with your actual hosted .wav / .mp3 URLs.
-// Plivo fetches them directly so they must be publicly accessible.
-const AUDIO = {
-  languageConfirmed: {
-    en:
-      process.env.AUDIO_CONFIRMED_EN ||
-      "https://YOUR_CDN/confirmed_english.wav",
-    te:
-      process.env.AUDIO_CONFIRMED_TE || "https://YOUR_CDN/confirmed_telugu.wav",
-  },
-  didNotUnderstand: {
-    en:
-      process.env.AUDIO_NOT_UNDERSTOOD_EN ||
-      "https://YOUR_CDN/not_understood_en.wav",
-    te:
-      process.env.AUDIO_NOT_UNDERSTOOD_TE ||
-      "https://YOUR_CDN/not_understood_te.wav",
-  },
+const SARVAM_TRANSLATE_URL = "https://api.sarvam.ai/translate";
+
+// Language code mapping — Sarvam STT gives us "en"/"te", translate API needs BCP-47
+const LANG_CODE = {
+  en: "en-IN",
+  te: "te-IN",
 };
 
-// ── Language detection ────────────────────────────────────────────────────────
+// ── Language detection from user's first reply ────────────────────────────────
 const LANG_KEYWORDS = {
   en: ["english", "eng", "angrezi", "inglis"],
   te: ["telugu", "telgu", "teligi", "తెలుగు"],
@@ -184,72 +178,117 @@ function detectLanguage(transcript) {
   return null;
 }
 
+// ── Static audio URLs — put in .env or replace inline ────────────────────────
+const AUDIO = {
+  languageConfirmed: {
+    en: process.env.AUDIO_CONFIRMED_EN || "https://YOUR_CDN/confirmed_english.wav",
+    te: process.env.AUDIO_CONFIRMED_TE || "https://YOUR_CDN/confirmed_telugu.wav",
+  },
+  didNotUnderstand: {
+    en: process.env.AUDIO_NOT_UNDERSTOOD_EN || "https://YOUR_CDN/not_understood_en.wav",
+    te: process.env.AUDIO_NOT_UNDERSTOOD_TE || "https://YOUR_CDN/not_understood_te.wav",
+  },
+};
+
 const TURN = { LANGUAGE_SELECT: "LANGUAGE_SELECT", MAIN: "MAIN" };
 
 class ConversationManager {
   constructor(callUUID) {
     this.callUUID = callUUID;
-    this.turn = TURN.LANGUAGE_SELECT;
+    this.turn     = TURN.LANGUAGE_SELECT;
     this.language = null; // "en" | "te"
   }
 
-  /**
-   * Call this with every final transcript.
-   * Returns { audioUrl: string, language: string|null }
-   */
   async handleTranscript(transcript) {
-    logger.info(
-      `[${this.callUUID}][Conv] Turn: ${this.turn} | "${transcript}"`,
-    );
+    logger.info(`[${this.callUUID}][Conv] Turn: ${this.turn} | "${transcript}"`);
 
-    // ── Turn 1: detect which language the user chose ──────────────────────
+    // ── Turn 1: detect language ───────────────────────────────────────────
     if (this.turn === TURN.LANGUAGE_SELECT) {
       const detected = detectLanguage(transcript);
 
       if (!detected) {
-        logger.info(
-          `[${this.callUUID}][Conv] Language not detected, re-asking`,
-        );
-        // Play "didn't understand" in English (default) and wait for next reply
+        logger.info(`[${this.callUUID}][Conv] Language not detected, re-asking`);
         return { audioUrl: AUDIO.didNotUnderstand.en, language: null };
       }
 
       this.language = detected;
-      this.turn = TURN.MAIN;
+      this.turn     = TURN.MAIN;
       logger.info(`[${this.callUUID}][Conv] Language confirmed → ${detected}`);
-      return {
-        audioUrl: AUDIO.languageConfirmed[detected],
-        language: detected,
-      };
+      return { audioUrl: AUDIO.languageConfirmed[detected], language: detected };
     }
 
-    // ── Turn 2+: send transcript to RAG, get audio URL back ───────────────
+    // ── Turn 2+: translate if Telugu → RAG → audio ────────────────────────
     if (this.turn === TURN.MAIN) {
-      const audioUrl = await this._callRag(transcript);
+      const audioUrl = await this._processAndCallRag(transcript);
       return { audioUrl, language: this.language };
     }
   }
 
+  async _processAndCallRag(transcript) {
+    let textForRag = transcript;
+
+    // Step 1: if Telugu, translate to English before sending to RAG
+    if (this.language === "te") {
+      logger.info(`[${this.callUUID}][Conv] Translating Telugu → English`);
+      textForRag = await this._translate(transcript, "te-IN", "en-IN");
+      logger.info(`[${this.callUUID}][Conv] Translated: "${textForRag}"`);
+    }
+
+    // Step 2: call RAG with English text + original language so it knows
+    // what language to respond in (for TTS on your RAG side)
+    const audioUrl = await this._callRag(textForRag);
+    return audioUrl;
+  }
+
   /**
-   * Replace the body of this function with your real RAG API call.
-   *
-   * Your RAG endpoint receives:
-   *   POST { transcript: string, language: "en" | "te" }
-   *
-   * Your RAG endpoint must return:
-   *   { audioUrl: "https://..." }   ← publicly accessible .wav or .mp3
+   * Sarvam Translate API
+   * @param {string} text - text to translate
+   * @param {string} from - BCP-47 source language e.g. "te-IN"
+   * @param {string} to   - BCP-47 target language e.g. "en-IN"
+   * @returns {string} translated text
    */
-  async _callRag(transcript) {
-    console.log("language", this.language);
-    const res = await fetch(process.env.RAG_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      //   body:    JSON.stringify({ transcript, language: this.language }),
+  async _translate(text, from, to) {
+    const res = await fetch(SARVAM_TRANSLATE_URL, {
+      method:  "POST",
+      headers: {
+        "Content-Type":        "application/json",
+        "api-subscription-key": process.env.SARVAM_API_KEY,
+      },
       body: JSON.stringify({
-        text: transcript,
-        projectUrl: "voice-ai-telephony-demo",
-        sessionId: "64eca96b-9a54-41ad-971f-ff5873e0e7f4",
-        language: this.language,
+        input:                  text,
+        source_language_code:   from,
+        target_language_code:   to,
+        mode:                   "formal",       // formal | informal | code-mixed
+        model:                  "mayura:v1",    // or "sarvam-translate:v1" for all 22 langs
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Sarvam Translate error ${res.status}: ${err}`);
+    }
+
+    const data = await res.json();
+    return data.translated_text;
+  }
+
+  /**
+   * Your RAG API call.
+   *
+   * Sends:
+   *   transcript — always in English (translated if user spoke Telugu)
+   *   language   — "en" | "te" (so your RAG/TTS knows which audio to generate)
+   *
+   * Expects back:
+   *   { audioUrl: "https://..." }  — publicly accessible .wav or .mp3
+   */
+  async _callRag(englishTranscript) {
+    const res = await fetch(process.env.RAG_API_URL, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        transcript: englishTranscript,  // always English
+        language:   this.language,      // "en" or "te" — for TTS on your side
       }),
     });
 
