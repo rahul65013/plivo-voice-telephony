@@ -135,8 +135,6 @@
 
 // module.exports = ConversationManager;
 
-
-
 /**
  * conversationManager.js
  *
@@ -156,12 +154,19 @@ const logger = require("./logger");
 // Plivo fetches them directly so they must be publicly accessible.
 const AUDIO = {
   languageConfirmed: {
-    en: process.env.AUDIO_CONFIRMED_EN || "https://YOUR_CDN/confirmed_english.wav",
-    te: process.env.AUDIO_CONFIRMED_TE || "https://YOUR_CDN/confirmed_telugu.wav",
+    en:
+      process.env.AUDIO_CONFIRMED_EN ||
+      "https://YOUR_CDN/confirmed_english.wav",
+    te:
+      process.env.AUDIO_CONFIRMED_TE || "https://YOUR_CDN/confirmed_telugu.wav",
   },
   didNotUnderstand: {
-    en: process.env.AUDIO_NOT_UNDERSTOOD_EN || "https://YOUR_CDN/not_understood_en.wav",
-    te: process.env.AUDIO_NOT_UNDERSTOOD_TE || "https://YOUR_CDN/not_understood_te.wav",
+    en:
+      process.env.AUDIO_NOT_UNDERSTOOD_EN ||
+      "https://YOUR_CDN/not_understood_en.wav",
+    te:
+      process.env.AUDIO_NOT_UNDERSTOOD_TE ||
+      "https://YOUR_CDN/not_understood_te.wav",
   },
 };
 
@@ -183,9 +188,9 @@ const TURN = { LANGUAGE_SELECT: "LANGUAGE_SELECT", MAIN: "MAIN" };
 
 class ConversationManager {
   constructor(callUUID) {
-    this.callUUID  = callUUID;
-    this.turn      = TURN.LANGUAGE_SELECT;
-    this.language  = null; // "en" | "te"
+    this.callUUID = callUUID;
+    this.turn = TURN.LANGUAGE_SELECT;
+    this.language = null; // "en" | "te"
   }
 
   /**
@@ -193,22 +198,29 @@ class ConversationManager {
    * Returns { audioUrl: string, language: string|null }
    */
   async handleTranscript(transcript) {
-    logger.info(`[${this.callUUID}][Conv] Turn: ${this.turn} | "${transcript}"`);
+    logger.info(
+      `[${this.callUUID}][Conv] Turn: ${this.turn} | "${transcript}"`,
+    );
 
     // ── Turn 1: detect which language the user chose ──────────────────────
     if (this.turn === TURN.LANGUAGE_SELECT) {
       const detected = detectLanguage(transcript);
 
       if (!detected) {
-        logger.info(`[${this.callUUID}][Conv] Language not detected, re-asking`);
+        logger.info(
+          `[${this.callUUID}][Conv] Language not detected, re-asking`,
+        );
         // Play "didn't understand" in English (default) and wait for next reply
         return { audioUrl: AUDIO.didNotUnderstand.en, language: null };
       }
 
       this.language = detected;
-      this.turn     = TURN.MAIN;
+      this.turn = TURN.MAIN;
       logger.info(`[${this.callUUID}][Conv] Language confirmed → ${detected}`);
-      return { audioUrl: AUDIO.languageConfirmed[detected], language: detected };
+      return {
+        audioUrl: AUDIO.languageConfirmed[detected],
+        language: detected,
+      };
     }
 
     // ── Turn 2+: send transcript to RAG, get audio URL back ───────────────
@@ -229,9 +241,15 @@ class ConversationManager {
    */
   async _callRag(transcript) {
     const res = await fetch(process.env.RAG_API_URL, {
-      method:  "POST",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ transcript, language: this.language }),
+      //   body:    JSON.stringify({ transcript, language: this.language }),
+      body: JSON.stringify({
+        text: transcript,
+        projectUrl: "vajrawestcity-kollur-neopolis-hyderabad-vajra-656189",
+        sessionId: "64eca96b-9a54-41ad-971f-ff5873e0e7f4",
+        language: this.language,
+      }),
     });
 
     if (!res.ok) throw new Error(`RAG API error: ${res.status}`);
