@@ -403,13 +403,13 @@ function detectBHK(text) {
 const AUDIO = {
   en: {
     // "No problem, have a nice day!" (user had no time)
-    notAvailable:    process.env.AUDIO_NOT_AVAILABLE_EN,
+    notAvailable: process.env.AUDIO_BRANCH_B_GOODBYE_EN,
 
     // "Are you comfortable with English or should we talk in Telugu?"
-    askLanguage:     process.env.AUDIO_ASK_LANGUAGE_EN,
+    askLanguage: process.env.AUDIO_ASK_LANGUAGE_EN,
 
     // "I saw you expressed interest in MSN One in Neopolis. Looking for 4 or 5 BHK?"
-    askBHK:          process.env.AUDIO_ASK_BHK_EN,
+    askBHK: process.env.AUDIO_ASK_BHK_EN,
 
     // "That's a great choice. We have luxurious 4 & 5 BHK. Would you like to know more?"
     branchA_details: process.env.AUDIO_BRANCH_A_DETAILS_EN,
@@ -424,9 +424,9 @@ const AUDIO = {
     didNotUnderstand: process.env.AUDIO_NOT_UNDERSTOOD_EN,
   },
   te: {
-    notAvailable:    process.env.AUDIO_NOT_AVAILABLE_TE,
-    askLanguage:     process.env.AUDIO_ASK_LANGUAGE_TE,
-    askBHK:          process.env.AUDIO_ASK_BHK_TE,
+    notAvailable: process.env.AUDIO_BRANCH_B_GOODBYE_TE,
+    askLanguage: process.env.AUDIO_ASK_LANGUAGE_TE,
+    askBHK: process.env.AUDIO_ASK_BHK_TE,
     branchA_details: process.env.AUDIO_BRANCH_A_DETAILS_TE,
     branchA_goodbye: process.env.AUDIO_BRANCH_A_GOODBYE_TE,
     branchB_goodbye: process.env.AUDIO_BRANCH_B_GOODBYE_TE,
@@ -470,15 +470,23 @@ class ConversationManager {
 
       // ── User responding to "Can I have 2 mins?" ──────────────────────
       case STEP.GREETING: {
-        if (isNegative(transcript) && !isPositive(transcript)) {
+        // Check negative FIRST and independently — a "no" should always end
+        // the call even if the reply also weakly matches a positive word.
+        if (isNegative(transcript)) {
           logger.info(`[${this.callUUID}][Conv] User declined → ending call`);
           this.step = STEP.DONE;
           return { audioUrl: this.audio("notAvailable"), done: true };
         }
-        // Positive or unclear → assume yes, continue
-        logger.info(`[${this.callUUID}][Conv] User agreed → asking language`);
-        this.step = STEP.ASK_LANGUAGE;
-        return { audioUrl: this.audio("askLanguage"), done: false };
+
+        if (isPositive(transcript)) {
+          logger.info(`[${this.callUUID}][Conv] User agreed → asking language`);
+          this.step = STEP.ASK_LANGUAGE;
+          return { audioUrl: this.audio("askLanguage"), done: false };
+        }
+
+        // Neither clearly positive nor negative — re-ask instead of assuming yes
+        logger.info(`[${this.callUUID}][Conv] Unclear reply → re-asking`);
+        return { audioUrl: this.audio("didNotUnderstand"), done: false };
       }
 
       // ── User picking English or Telugu ────────────────────────────────
