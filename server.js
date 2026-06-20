@@ -237,9 +237,45 @@ wss.on("connection", (ws, req) => {
     if (!conv) return;
 
     try {
-      const { audioUrl, language } = await conv.handleTranscript(transcript);
+      const { audioUrl, done, language } =
+        await conv.handleTranscript(transcript);
       if (language) logger.info(`[CONV] Language: ${language}`);
-      if (audioUrl) await playAudioUrl(audioUrl);
+
+      if (audioUrl) {
+        await playAudioUrl(audioUrl);
+
+        if (done) {
+          // Estimate audio duration from env, default 6s — set GOODBYE_AUDIO_DURATION_MS in .env
+          // to match the length of your longest goodbye audio file
+          const delay = parseInt(
+            process.env.GOODBYE_AUDIO_DURATION_MS || "8000",
+            10,
+          );
+          logger.info(
+            `[CONV] done=true — hanging up in ${delay}ms after goodbye audio`,
+          );
+          setTimeout(async () => {
+            try {
+              await plivoClient.calls.hangup(callUUID);
+              logger.info(`[CONV] ✅ Call hung up`);
+            } catch (err) {
+              // Call may have already ended by the time we hang up — that's fine
+              logger.warn(
+                `[CONV] Hangup skipped (call likely already ended): ${err.message}`,
+              );
+            }
+          }, delay);
+        }
+      } else if (done) {
+        // No audio to play — hang up immediately
+        logger.info(`[CONV] done=true, no audio — hanging up now`);
+        try {
+          await plivoClient.calls.hangup(callUUID);
+          logger.info(`[CONV] ✅ Call hung up`);
+        } catch (err) {
+          logger.warn(`[CONV] Hangup skipped: ${err.message}`);
+        }
+      }
     } catch (err) {
       logger.error(`[TRANSCRIPT] Handler error: ${err.message}`);
     }
