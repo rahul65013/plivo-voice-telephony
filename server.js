@@ -248,7 +248,7 @@ wss.on("connection", (ws, req) => {
           // Estimate audio duration from env, default 6s — set GOODBYE_AUDIO_DURATION_MS in .env
           // to match the length of your longest goodbye audio file
           const delay = parseInt(
-            process.env.GOODBYE_AUDIO_DURATION_MS || "8000",
+            process.env.GOODBYE_AUDIO_DURATION_MS || "9000",
             10,
           );
           logger.info(
