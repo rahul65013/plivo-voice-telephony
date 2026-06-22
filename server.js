@@ -78,9 +78,46 @@ app.all("/answer", (_req, res) => {
   res.set("Content-Type", "text/xml").send(xml);
 });
 
-app.post("/hangup", (req, res) => {
-  logger.info(`[HTTP] /hangup — ${req.body?.CallUUID}`);
-  res.sendStatus(200);
+
+const retryableErrors = [
+  "Network Congestion From Carrier",
+  "Temporary Failure",
+  "No Route To Destination",
+];
+
+app.post("/hangup", async (req, res) => {
+  try {
+    logger.info(`[HANGUP] Payload: ${JSON.stringify(req.body, null, 2)}`);
+
+    const { CallUUID, From, To, HangupCause } = req.body;
+
+    logger.info(`[HANGUP] UUID=${CallUUID} Cause=${HangupCause}`);
+
+    if (
+      retryableErrors.includes(HangupCause) &&
+      From === process.env.PLIVO_FROM_NUMBER
+    ) {
+      logger.warn(`[HANGUP] Retrying call using secondary number`);
+
+      await plivoClient.calls.create(
+        process.env.PLIVO_SECONDARY_NUMBER,
+        To,
+        `${BASE_URL}/answer`,
+        {
+          answerMethod: "POST",
+          hangupUrl: `${BASE_URL}/hangup`,
+          hangupMethod: "POST",
+        },
+      );
+
+      logger.info(`[HANGUP] Retry initiated from secondary number`);
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    logger.error(`[HANGUP] ${err.message}`);
+    res.sendStatus(500);
+  }
 });
 
 app.post("/make-call", async (req, res) => {
