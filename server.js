@@ -94,38 +94,26 @@ app.post("/hangup", async (req, res) => {
     logger.info(`[HANGUP] UUID=${CallUUID} Cause=${HangupCause}`);
 
 
-    await plivoClient.calls.create(
-      process.env.PLIVO_SECONDARY_NUMBER,
-      To,
-      `${BASE_URL}/answer`,
-      {
-        answerMethod: "POST",
-        hangupUrl: `${BASE_URL}/hangup`,
-        hangupMethod: "POST",
-      },
-    );
 
-    logger.info(`[HANGUP] Retry initiated from secondary number`);
+    if (
+      retryableErrors.includes(HangupCause) &&
+      From === process.env.PLIVO_FROM_NUMBER
+    ) {
+      logger.warn(`[HANGUP] Retrying call using secondary number`);
 
-    // if (
-    //   retryableErrors.includes(HangupCause) &&
-    //   From === process.env.PLIVO_FROM_NUMBER
-    // ) {
-    //   logger.warn(`[HANGUP] Retrying call using secondary number`);
+      await plivoClient.calls.create(
+        process.env.PLIVO_SECONDARY_NUMBER,
+        To,
+        `${BASE_URL}/answer`,
+        {
+          answerMethod: "POST",
+          hangupUrl: `${BASE_URL}/hangup`,
+          hangupMethod: "POST",
+        },
+      );
 
-    //   await plivoClient.calls.create(
-    //     process.env.PLIVO_SECONDARY_NUMBER,
-    //     To,
-    //     `${BASE_URL}/answer`,
-    //     {
-    //       answerMethod: "POST",
-    //       hangupUrl: `${BASE_URL}/hangup`,
-    //       hangupMethod: "POST",
-    //     },
-    //   );
-
-    //   logger.info(`[HANGUP] Retry initiated from secondary number`);
-    // }
+      logger.info(`[HANGUP] Retry initiated from secondary number`);
+    }
 
     res.sendStatus(200);
   } catch (err) {
