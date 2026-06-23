@@ -495,7 +495,7 @@ class ConversationManager {
 
         if (!detected) {
           logger.info(`[${this.callUUID}][Conv] Language unclear → re-asking`);
-          return { audioUrl: this.audio("didNotUnderstand"), done: false };
+          return { audioUrl: this.audio("askLanguage"), done: false };
         }
 
         this.language = detected;
