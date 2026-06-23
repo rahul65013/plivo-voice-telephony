@@ -319,57 +319,54 @@
 
 
 /**
- * conversationManager.js — MSN Realty Branching Script
+ * conversationManager.js — MSN Realty Full Script
  *
  * FLOW:
  *
- *  [GREETING_AUDIO plays via <Play> in /answer XML before stream opens]
- *  "Hello, this is Aditi from MSN Realty. Can I have 2 mins?"
+ *  [Greeting audio plays via <Play> in /answer XML]
+ *  "Hello, this is Aditi from MSN Realty. Is this Mr. [name]?"
  *
- *  User replies →
- *
- *  STEP: GREETING
- *    [yes/positive] → play askLanguage    → STEP: ASK_LANGUAGE
- *    [no/negative]  → play notAvailable   → done (hang up)
+ *  STEP: CONFIRM_PERSON
+ *    [yes]    → askLanguage       → STEP: ASK_LANGUAGE
+ *    [no]     → notAvailable      → done ❌
+ *    [unclear] → didNotUnderstand → re-ask
  *
  *  STEP: ASK_LANGUAGE
- *    "Are you comfortable with English or should we talk in Telugu?"
- *    [english] → language = "en" → play askBHK  → STEP: ASK_BHK
- *    [telugu]  → language = "te" → play askBHK  → STEP: ASK_BHK
- *    [unclear] → re-ask askLanguage
+ *    [english] → language="en" → askBHK → STEP: ASK_BHK
+ *    [telugu]  → language="te" → askBHK → STEP: ASK_BHK
+ *    [unclear] → re-ask
  *
  *  STEP: ASK_BHK
- *    "Are you looking for a 4 or 5 BHK?"
- *    [4 or 5]      → save bhk → play branchA_details → STEP: ASK_MORE
- *    [not interested / negative] → play branchB_goodbye → done (hang up)
+ *    [4]              → details4BHK    → STEP: ASK_CALLBACK   [Part A - 4BHK]
+ *    [5]              → details5BHK    → STEP: ASK_CALLBACK   [Part A - 5BHK]
+ *    [negative/none]  → branchB_goodbye → done ❌             [Part B - not interested]  leadScore: Negative
+ *    [other BHK 2/3]  → branchC_offer  → STEP: ASK_OTHER_BHK [Part C - wrong BHK]       leadScore: Maybe
  *
- *  STEP: ASK_MORE
- *    "Would you like to know more? My senior manager Neha Rao will call you."
- *    [yes/positive] → save wantsCallback=true  → play branchA_goodbye → done
- *    [no/negative]  → save wantsCallback=false → play branchB_goodbye → done
+ *  STEP: ASK_CALLBACK  (after 4 or 5 BHK details played)
+ *    [yes] → callbackGoodbye → done ✅   leadScore: Positive
+ *    [no]  → noCallbackGoodbye → done ✅ leadScore: Maybe
+ *
+ *  STEP: ASK_OTHER_BHK  (Part C — offered 4/5 after they said 2/3)
+ *    [yes] → callbackGoodbye → done ✅
+ *    [no]  → noCallbackGoodbye → done ✅
  */
 
 const logger = require("./logger");
+const { createCallLog, updateCallLog } = require("./db");
 
-// ── Keyword detection ─────────────────────────────────────────────────────────
+// ── Keyword helpers ───────────────────────────────────────────────────────────
 
 const POSITIVE_WORDS = [
   "yes", "yeah", "yep", "sure", "okay", "ok", "of course", "definitely",
   "absolutely", "please", "go ahead", "fine", "alright", "correct",
-  "haan", "ha", "theek", "zaroor", "bilkul",
-  "avunu", "అవును", "sari", "సరి",
+  "haan", "ha", "theek", "zaroor", "bilkul", "avunu", "అవును", "sari", "సరి",
 ];
 
 const NEGATIVE_WORDS = [
-  "no", "nope", "not", "never", "don't", "didn't", "i am not", "i'm not",
-  "nahi", "mat", "ledu", "వద్దు", "లేదు", "not interested", "not looking",
-  "i did not", "i haven't",
+  "no", "nope", "never", "don't", "didn't", "i am not", "i'm not",
+  "nahi", "mat", "ledu", "వద్దు", "లేదు",
+  "not interested", "not looking", "i did not", "i haven't", "didn't",
 ];
-
-const LANG_KEYWORDS = {
-  en: ["english", "eng", "angrezi", "inglis"],
-  te: ["telugu", "telgu", "teligi", "తెలుగు"],
-};
 
 function isPositive(text) {
   const t = text.toLowerCase();
@@ -383,163 +380,266 @@ function isNegative(text) {
 
 function detectLanguage(text) {
   const t = text.toLowerCase();
-  for (const [lang, kws] of Object.entries(LANG_KEYWORDS)) {
-    if (kws.some((kw) => t.includes(kw))) return lang;
-  }
+  if (["english", "eng", "angrezi", "inglis"].some((w) => t.includes(w))) return "en";
+  if (["telugu", "telgu", "teligi", "తెలుగు"].some((w) => t.includes(w))) return "te";
   return null;
 }
 
+/**
+ * Detect BHK preference from transcript.
+ * Returns: "4" | "5" | "other" | null
+ *   "other" = they mentioned 1/2/3 BHK (not what we sell)
+ *   null    = couldn't detect any BHK mention
+ */
 function detectBHK(text) {
   const t = text.toLowerCase();
-  if (t.includes("5") || t.includes("five")) return "5";
-  if (t.includes("4") || t.includes("four")) return "4";
+  if (t.includes("5") || t.includes("five"))  return "5";
+  if (t.includes("4") || t.includes("four"))  return "4";
+  if (
+    t.includes("3") || t.includes("three") ||
+    t.includes("2") || t.includes("two")   ||
+    t.includes("1") || t.includes("one")   ||
+    t.includes("bhk")  // mentioned BHK but not 4 or 5
+  ) return "other";
   return null;
 }
 
-// ── Audio URL map ─────────────────────────────────────────────────────────────
-// Every URL comes from .env so you just swap files without touching code.
-// Key naming: AUDIO_<STEP>_<EN|TE>
-
+// ── Audio URL map — all from .env ─────────────────────────────────────────────
 const AUDIO = {
   en: {
-    // "No problem, have a nice day!" (user had no time)
-    notAvailable: process.env.AUDIO_BRANCH_B_GOODBYE_EN,
+    // "Wrong number / not the person" — end call politely
+    notAvailable:       process.env.AUDIO_NOT_AVAILABLE_EN,
 
-    // "Are you comfortable with English or should we talk in Telugu?"
-    askLanguage: process.env.AUDIO_ASK_LANGUAGE_EN,
+    // "Are you comfortable with English or Telugu?"
+    askLanguage:        process.env.AUDIO_ASK_LANGUAGE_EN,
 
-    // "I saw you expressed interest in MSN One in Neopolis. Looking for 4 or 5 BHK?"
-    askBHK: process.env.AUDIO_ASK_BHK_EN,
+    // "I saw you expressed interest in MSN One. Looking for 4 or 5 BHK?"
+    askBHK:             process.env.AUDIO_ASK_BHK_EN,
 
-    // "That's a great choice. We have luxurious 4 & 5 BHK. Would you like to know more?"
-    branchA_details: process.env.AUDIO_BRANCH_A_DETAILS_EN,
+    // Part A — 4 BHK details + ask for callback
+    // "We have well-crafted 4BHKs starting at 5300 sqft... Shall I ask Neha to call?"
+    details4BHK:        process.env.AUDIO_DETAILS_4BHK_EN,
 
-    // "Neha Rao will call you soon to explain. Thanks for your time. Bye!"
-    branchA_goodbye: process.env.AUDIO_BRANCH_A_GOODBYE_EN,
+    // Part A — 5 BHK details + ask for callback
+    // "5BHK is a great choice. Starting at 7200 sqft... Shall I ask Neha to call?"
+    details5BHK:        process.env.AUDIO_DETAILS_5BHK_EN,
 
-    // "No problem. If you do anytime, visit www.msnrealty.com. Have a nice day!"
-    branchB_goodbye: process.env.AUDIO_BRANCH_B_GOODBYE_EN,
+    // Part A — yes to callback [Lead: Positive]
+    // "Neha Kapoor will call you soon. Thanks! Bye!"
+    callbackGoodbye:    process.env.AUDIO_CALLBACK_GOODBYE_EN,
 
-    // "Sorry, I didn't catch that. Could you repeat?"
-    didNotUnderstand: process.env.AUDIO_NOT_UNDERSTOOD_EN,
+    // Part A — no to callback / Part C — no to alt offer [Lead: Maybe]
+    // "No problem. Visit www.msnrealty.com. Have a nice day!"
+    noCallbackGoodbye:  process.env.AUDIO_NO_CALLBACK_GOODBYE_EN,
+
+    // Part B — not interested in any BHK [Lead: Negative]
+    // "No problem. If you change your mind, visit www.msnrealty.com. Have a nice day!"
+    branchB_goodbye:    process.env.AUDIO_BRANCH_B_GOODBYE_EN,
+
+    // Part C — they want 2/3 BHK, offer 4/5
+    // "We don't have that. But would you be interested in our 4 or 5 BHK?"
+    branchC_offer:      process.env.AUDIO_BRANCH_C_OFFER_EN,
+
+    // Default fallback
+    didNotUnderstand:   process.env.AUDIO_NOT_UNDERSTOOD_EN,
   },
   te: {
-    notAvailable: process.env.AUDIO_BRANCH_B_GOODBYE_TE,
-    askLanguage: process.env.AUDIO_ASK_LANGUAGE_TE,
-    askBHK: process.env.AUDIO_ASK_BHK_TE,
-    branchA_details: process.env.AUDIO_BRANCH_A_DETAILS_TE,
-    branchA_goodbye: process.env.AUDIO_BRANCH_A_GOODBYE_TE,
-    branchB_goodbye: process.env.AUDIO_BRANCH_B_GOODBYE_TE,
-    didNotUnderstand: process.env.AUDIO_NOT_UNDERSTOOD_TE,
+    notAvailable:       process.env.AUDIO_NOT_AVAILABLE_TE,
+    askLanguage:        process.env.AUDIO_ASK_LANGUAGE_TE,
+    askBHK:             process.env.AUDIO_ASK_BHK_TE,
+    details4BHK:        process.env.AUDIO_DETAILS_4BHK_TE,
+    details5BHK:        process.env.AUDIO_DETAILS_5BHK_TE,
+    callbackGoodbye:    process.env.AUDIO_CALLBACK_GOODBYE_TE,
+    noCallbackGoodbye:  process.env.AUDIO_NO_CALLBACK_GOODBYE_TE,
+    branchB_goodbye:    process.env.AUDIO_BRANCH_B_GOODBYE_TE,
+    branchC_offer:      process.env.AUDIO_BRANCH_C_OFFER_TE,
+    didNotUnderstand:   process.env.AUDIO_NOT_UNDERSTOOD_TE,
   },
 };
 
+// Lead score values saved to DynamoDB
+const LEAD_SCORE = {
+  POSITIVE: "Positive",
+  MAYBE:    "Maybe",
+  NEGATIVE: "Negative",
+};
+
 const STEP = {
-  GREETING:     "GREETING",     // user responding to "can I have 2 mins?"
-  ASK_LANGUAGE: "ASK_LANGUAGE", // user picking English or Telugu
-  ASK_BHK:      "ASK_BHK",     // user saying 4, 5, or not interested
-  ASK_MORE:     "ASK_MORE",     // user saying yes/no to callback
-  DONE:         "DONE",
+  CONFIRM_PERSON: "CONFIRM_PERSON", // "Is this Mr. X?"
+  ASK_LANGUAGE:   "ASK_LANGUAGE",   // "English or Telugu?"
+  ASK_BHK:        "ASK_BHK",        // "4 or 5 BHK?"
+  ASK_CALLBACK:   "ASK_CALLBACK",   // "Shall I ask Neha to call?" (after 4 or 5 BHK details)
+  ASK_OTHER_BHK:  "ASK_OTHER_BHK",  // Part C: "Interested in 4/5 instead?"
+  DONE:           "DONE",
 };
 
 class ConversationManager {
   constructor(callUUID) {
-    this.callUUID = callUUID;
-    this.step     = STEP.GREETING;
-    this.language = "en";  // default until user picks
-    this.answers  = {};    // collected: { bhk, wantsCallback }
+    this.callUUID  = callUUID;
+    this.step      = STEP.CONFIRM_PERSON;
+    this.language  = "en";
+    this.answers   = {};    // { bhk, wantsCallback, leadScore, interested }
+    this.startedAt = Date.now();
+    this.turnCount = 0;
   }
 
-  // Shorthand — gets audio URL for current language
   audio(key) {
     const url = AUDIO[this.language][key];
-    if (!url) logger.warn(`[${this.callUUID}][Conv] Missing audio URL for key: ${key} lang: ${this.language}`);
+    if (!url) logger.warn(`[${this.callUUID}][Conv] Missing audio URL: ${key} (${this.language})`);
     return url;
   }
 
-  /**
-   * Called with every final transcript from the user.
-   * @returns {{ audioUrl: string|null, done: boolean }}
-   *   audioUrl — play this on the call (null = nothing to play)
-   *   done     — true = hang up after playing audioUrl
-   */
+  async _save(transcript, outcome = null) {
+    const isFinal     = outcome !== null;
+    const endedAt     = isFinal ? Date.now() : null;
+    const durationSec = isFinal ? Math.round((endedAt - this.startedAt) / 1000) : null;
+
+    if (this.turnCount === 1) {
+      await createCallLog({ callUUID: this.callUUID, startedAt: this.startedAt });
+    }
+
+    await updateCallLog({
+      callUUID: this.callUUID,
+      transcript,
+      step:     this.step,
+      language: this.language,
+      answers:  this.answers,
+      ...(isFinal && { outcome, endedAt, durationSec }),
+    });
+  }
+
   async handleTranscript(transcript) {
-    logger.info(`[${this.callUUID}][Conv] STEP:${this.step} LANG:${this.language} | "${transcript}"`);
+    this.turnCount++;
+    logger.info(`[${this.callUUID}][Conv] Turn:${this.turnCount} Step:${this.step} | "${transcript}"`);
 
     switch (this.step) {
 
-      // ── User responding to "Can I have 2 mins?" ──────────────────────
-      case STEP.GREETING: {
-        // Check negative FIRST and independently — a "no" should always end
-        // the call even if the reply also weakly matches a positive word.
+      // ── "Is this Mr. [name]?" ─────────────────────────────────────────────
+      case STEP.CONFIRM_PERSON: {
         if (isNegative(transcript)) {
-          logger.info(`[${this.callUUID}][Conv] User declined → ending call`);
+          logger.info(`[${this.callUUID}][Conv] Wrong person → ending call`);
           this.step = STEP.DONE;
+          await this._save(transcript, "wrong_person");
           return { audioUrl: this.audio("notAvailable"), done: true };
         }
 
         if (isPositive(transcript)) {
-          logger.info(`[${this.callUUID}][Conv] User agreed → asking language`);
+          logger.info(`[${this.callUUID}][Conv] Person confirmed → asking language`);
           this.step = STEP.ASK_LANGUAGE;
+          await this._save(transcript);
           return { audioUrl: this.audio("askLanguage"), done: false };
         }
 
-        // Neither clearly positive nor negative — re-ask instead of assuming yes
-        logger.info(`[${this.callUUID}][Conv] Unclear reply → re-asking`);
+        // Unclear — re-ask
+        await this._save(transcript);
         return { audioUrl: this.audio("didNotUnderstand"), done: false };
       }
 
-      // ── User picking English or Telugu ────────────────────────────────
+      // ── "English or Telugu?" ──────────────────────────────────────────────
       case STEP.ASK_LANGUAGE: {
         const detected = detectLanguage(transcript);
 
         if (!detected) {
-          logger.info(`[${this.callUUID}][Conv] Language unclear → re-asking`);
+          await this._save(transcript);
           return { audioUrl: this.audio("didNotUnderstand"), done: false };
         }
 
         this.language = detected;
-        logger.info(`[${this.callUUID}][Conv] Language set → ${detected}`);
+        logger.info(`[${this.callUUID}][Conv] Language → ${detected}`);
         this.step = STEP.ASK_BHK;
+        await this._save(transcript);
         return { audioUrl: this.audio("askBHK"), done: false };
       }
 
-      // ── User responding to "4 or 5 BHK?" ─────────────────────────────
+      // ── "4 or 5 BHK?" ────────────────────────────────────────────────────
       case STEP.ASK_BHK: {
         const bhk = detectBHK(transcript);
 
+        // Part B — explicitly not interested
         if (!bhk && isNegative(transcript)) {
-          // Branch B — not interested
-          logger.info(`[${this.callUUID}][Conv] Not interested → Branch B`);
+          logger.info(`[${this.callUUID}][Conv] Not interested → Part B`);
           this.answers.interested = false;
+          this.answers.leadScore  = LEAD_SCORE.NEGATIVE;
           this.step = STEP.DONE;
+          await this._save(transcript, "not_interested");
           return { audioUrl: this.audio("branchB_goodbye"), done: true };
         }
 
-        // Branch A — interested (said 4, 5, or something positive)
-        this.answers.bhk         = bhk || "4 or 5"; // if they said "either" etc.
-        this.answers.interested  = true;
-        logger.info(`[${this.callUUID}][Conv] BHK: ${this.answers.bhk} → Branch A`);
-        this.step = STEP.ASK_MORE;
-        return { audioUrl: this.audio("branchA_details"), done: false };
+        // Part A — 4 BHK
+        if (bhk === "4") {
+          logger.info(`[${this.callUUID}][Conv] 4 BHK → Part A`);
+          this.answers.bhk        = "4";
+          this.answers.interested = true;
+          this.step = STEP.ASK_CALLBACK;
+          await this._save(transcript);
+          return { audioUrl: this.audio("details4BHK"), done: false };
+        }
+
+        // Part A — 5 BHK
+        if (bhk === "5") {
+          logger.info(`[${this.callUUID}][Conv] 5 BHK → Part A`);
+          this.answers.bhk        = "5";
+          this.answers.interested = true;
+          this.step = STEP.ASK_CALLBACK;
+          await this._save(transcript);
+          return { audioUrl: this.audio("details5BHK"), done: false };
+        }
+
+        // Part C — wrong BHK (2/3 etc)
+        if (bhk === "other") {
+          logger.info(`[${this.callUUID}][Conv] Other BHK → Part C`);
+          this.answers.bhk       = "other";
+          this.answers.leadScore = LEAD_SCORE.MAYBE;
+          this.step = STEP.ASK_OTHER_BHK;
+          await this._save(transcript);
+          return { audioUrl: this.audio("branchC_offer"), done: false };
+        }
+
+        // Couldn't detect BHK at all — re-ask
+        logger.info(`[${this.callUUID}][Conv] BHK unclear → re-asking`);
+        await this._save(transcript);
+        return { audioUrl: this.audio("didNotUnderstand"), done: false };
       }
 
-      // ── User responding to "Would you like to know more?" ────────────
-      case STEP.ASK_MORE: {
-        this.answers.wantsCallback = !isNegative(transcript); // yes = wants callback
-        logger.info(`[${this.callUUID}][Conv] Wants callback: ${this.answers.wantsCallback}`);
-        logger.info(`[${this.callUUID}][Conv] ✅ FINAL ANSWERS: ${JSON.stringify(this.answers)}`);
-
-        // TODO: persist answers to your DB here
-        // await db.save({ callUUID: this.callUUID, ...this.answers });
-
-        this.step = STEP.DONE;
-
-        if (this.answers.wantsCallback) {
-          return { audioUrl: this.audio("branchA_goodbye"), done: true };
-        } else {
-          return { audioUrl: this.audio("branchB_goodbye"), done: true };
+      // ── "Shall I ask Neha to call?" (Part A — after 4 or 5 BHK details) ──
+      case STEP.ASK_CALLBACK: {
+        if (isNegative(transcript)) {
+          // No callback — Lead: Maybe
+          logger.info(`[${this.callUUID}][Conv] No callback → Lead: Maybe`);
+          this.answers.wantsCallback = false;
+          this.answers.leadScore     = LEAD_SCORE.MAYBE;
+          this.step = STEP.DONE;
+          await this._save(transcript, "completed_no_callback");
+          return { audioUrl: this.audio("noCallbackGoodbye"), done: true };
         }
+
+        // Yes callback — Lead: Positive
+        logger.info(`[${this.callUUID}][Conv] Wants callback → Lead: Positive`);
+        this.answers.wantsCallback = true;
+        this.answers.leadScore     = LEAD_SCORE.POSITIVE;
+        this.step = STEP.DONE;
+        await this._save(transcript, "completed_callback");
+        return { audioUrl: this.audio("callbackGoodbye"), done: true };
+      }
+
+      // ── Part C: "Interested in 4 or 5 BHK instead?" ──────────────────────
+      case STEP.ASK_OTHER_BHK: {
+        if (isNegative(transcript)) {
+          // Still not interested — Lead: Maybe (already set)
+          logger.info(`[${this.callUUID}][Conv] Part C rejected → ending`);
+          this.answers.wantsCallback = false;
+          this.step = STEP.DONE;
+          await this._save(transcript, "completed_no_callback");
+          return { audioUrl: this.audio("noCallbackGoodbye"), done: true };
+        }
+
+        // Interested in 4/5 after all — Lead: Positive
+        logger.info(`[${this.callUUID}][Conv] Part C accepted → Lead: Positive`);
+        this.answers.wantsCallback = true;
+        this.answers.leadScore     = LEAD_SCORE.POSITIVE;
+        this.step = STEP.DONE;
+        await this._save(transcript, "completed_callback");
+        return { audioUrl: this.audio("callbackGoodbye"), done: true };
       }
 
       default:
