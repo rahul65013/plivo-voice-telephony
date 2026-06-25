@@ -182,6 +182,11 @@ wss.on("connection", (ws, req) => {
         logger.info(`[WS] toNumber: ${toNumber}`);
 
         conv = new ConversationManager(callUUID, toNumber);
+
+        // Create DB record immediately when call connects — don't wait for first transcript
+        // This ensures the record exists before any updateCallLog calls
+        await conv.initCallLog();
+
         session = new CallSession({
           callUUID,
           sarvamApiKey: process.env.SARVAM_API_KEY,
