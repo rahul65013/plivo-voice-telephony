@@ -48,10 +48,6 @@ const plivoClient = new plivo.Client(
   process.env.PLIVO_AUTH_TOKEN,
 );
 
-// Stores toNumber keyed by requestUuid from /make-call
-// so we can look it up when the WS stream connects
-const pendingCalls = new Map(); // requestUuid → toNumber
-
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -82,7 +78,6 @@ app.all("/answer", (_req, res) => {
   res.set("Content-Type", "text/xml").send(xml);
 });
 
-
 const retryableErrors = [
   "Network Congestion From Carrier",
   "Temporary Failure",
@@ -96,8 +91,6 @@ app.post("/hangup", async (req, res) => {
     const { CallUUID, From, To, HangupCause } = req.body;
 
     logger.info(`[HANGUP] UUID=${CallUUID} Cause=${HangupCause}`);
-
-
 
     if (
       retryableErrors.includes(HangupCause) &&
@@ -142,7 +135,6 @@ app.post("/make-call", async (req, res) => {
       },
     );
     logger.info(`[MAKE_CALL] Success — ${result.requestUuid}`);
-    pendingCalls.set(result.requestUuid, toNumber);
     res.json(result);
   } catch (err) {
     logger.error(`[MAKE_CALL] ${err.message}`);
@@ -221,16 +213,7 @@ wss.on("connection", (ws, req) => {
           msg.start?.callId || msg.start?.streamSid || `call-${Date.now()}`;
         logger.info(`[WS] START — callUUID: ${callUUID}`);
 
-        // Look up toNumber stored at make-call time
-        // Plivo's requestUuid becomes the callId once the call connects
-        const toNumber =
-          pendingCalls.get(callUUID) ||
-          pendingCalls.get(msg.start?.requestUuid) ||
-          "unknown";
-        pendingCalls.delete(callUUID);
-        logger.info(`[WS] toNumber: ${toNumber}`);
-
-        conv = new ConversationManager(callUUID, toNumber);
+        conv = new ConversationManager(callUUID);
         session = new CallSession({
           callUUID,
           sarvamApiKey: process.env.SARVAM_API_KEY,
