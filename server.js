@@ -56,6 +56,9 @@ app.all("/answer", (req, res) => {
   const callUUID = req.body?.CallUUID || req.query?.CallUUID || "unknown";
   logger.info(`[HTTP] /answer — CallUUID: ${callUUID} To: ${toNumber}`);
 
+  const audioUrl = req.query.audioUrl;
+  console.log("audioUrl", audioUrl);
+
   // Store toNumber keyed by CallUUID — this is reliable because
   // Plivo's CallUUID in /answer matches the callId in the WS start event
   if (callUUID !== "unknown") pendingCalls.set(callUUID, toNumber);
@@ -63,6 +66,7 @@ app.all("/answer", (req, res) => {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${GREETING_AUDIO_URL}</Play>
+  <Play>${audioUrl}</Play>
   <Stream
     bidirectional="true"
     keepCallAlive="true"
