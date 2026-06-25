@@ -1,17 +1,3 @@
-// /**
-//  * server.js
-//  *
-//  * Plivo outbound call bot:
-//  *   POST /make-call  → dials the number
-//  *   POST /answer     → returns XML (Speak greeting + bidirectional Stream)
-//  *   WS   /stream     → receives Plivo audio, pipes to Sarvam STT
-//  *
-//  * Flow:
-//  *   call answered → greeting played → stream opens → user speaks
-//  *   → Sarvam transcribes → handleTranscript() called with text
-//  *   → (TODO) fetch audio URL from your API → play it back
-//  */
-
 require("dotenv").config();
 
 const http = require("http");
@@ -48,6 +34,10 @@ const plivoClient = new plivo.Client(
   process.env.PLIVO_AUTH_TOKEN,
 );
 
+// Stores toNumber keyed by requestUuid from /make-call
+// so we can look it up when the WS stream connects
+const pendingCalls = new Map(); // requestUuid → toNumber
+
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -78,45 +68,9 @@ app.all("/answer", (_req, res) => {
   res.set("Content-Type", "text/xml").send(xml);
 });
 
-const retryableErrors = [
-  "Network Congestion From Carrier",
-  "Temporary Failure",
-  "No Route To Destination",
-];
-
-app.post("/hangup", async (req, res) => {
-  try {
-    logger.info(`[HANGUP] Payload: ${JSON.stringify(req.body, null, 2)}`);
-
-    const { CallUUID, From, To, HangupCause } = req.body;
-
-    logger.info(`[HANGUP] UUID=${CallUUID} Cause=${HangupCause}`);
-
-    if (
-      retryableErrors.includes(HangupCause) &&
-      From === process.env.PLIVO_FROM_NUMBER
-    ) {
-      logger.warn(`[HANGUP] Retrying call using secondary number`);
-
-      await plivoClient.calls.create(
-        process.env.PLIVO_SECONDARY_NUMBER,
-        To,
-        `${BASE_URL}/answer`,
-        {
-          answerMethod: "POST",
-          hangupUrl: `${BASE_URL}/hangup`,
-          hangupMethod: "POST",
-        },
-      );
-
-      logger.info(`[HANGUP] Retry initiated from secondary number`);
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    logger.error(`[HANGUP] ${err.message}`);
-    res.sendStatus(500);
-  }
+app.post("/hangup", (req, res) => {
+  logger.info(`[HTTP] /hangup — ${req.body?.CallUUID}`);
+  res.sendStatus(200);
 });
 
 app.post("/make-call", async (req, res) => {
@@ -135,6 +89,7 @@ app.post("/make-call", async (req, res) => {
       },
     );
     logger.info(`[MAKE_CALL] Success — ${result.requestUuid}`);
+    pendingCalls.set(result.requestUuid, toNumber);
     res.json(result);
   } catch (err) {
     logger.error(`[MAKE_CALL] ${err.message}`);
@@ -189,7 +144,7 @@ wss.on("connection", (ws, req) => {
     isPlayingAudio = true;
     try {
       logger.info(`[${callUUID}] 🔊 Playing: ${audioUrl}`);
-      await plivoClient.calls.playMusic(callUUID, audioUrl); // ← only change
+      await plivoClient.calls.play(callUUID, audioUrl);
     } catch (err) {
       logger.error(`[${callUUID}] play error: ${err.message}`);
     } finally {
@@ -213,7 +168,16 @@ wss.on("connection", (ws, req) => {
           msg.start?.callId || msg.start?.streamSid || `call-${Date.now()}`;
         logger.info(`[WS] START — callUUID: ${callUUID}`);
 
-        conv = new ConversationManager(callUUID);
+        // Look up toNumber stored at make-call time
+        // Plivo's requestUuid becomes the callId once the call connects
+        const toNumber =
+          pendingCalls.get(callUUID) ||
+          pendingCalls.get(msg.start?.requestUuid) ||
+          "unknown";
+        pendingCalls.delete(callUUID);
+        logger.info(`[WS] toNumber: ${toNumber}`);
+
+        conv = new ConversationManager(callUUID, toNumber);
         session = new CallSession({
           callUUID,
           sarvamApiKey: process.env.SARVAM_API_KEY,
@@ -284,7 +248,7 @@ wss.on("connection", (ws, req) => {
           // Estimate audio duration from env, default 6s — set GOODBYE_AUDIO_DURATION_MS in .env
           // to match the length of your longest goodbye audio file
           const delay = parseInt(
-            process.env.GOODBYE_AUDIO_DURATION_MS || "9000",
+            process.env.GOODBYE_AUDIO_DURATION_MS || "6000",
             10,
           );
           logger.info(
