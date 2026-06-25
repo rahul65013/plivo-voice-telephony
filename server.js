@@ -144,7 +144,7 @@ wss.on("connection", (ws, req) => {
     isPlayingAudio = true;
     try {
       logger.info(`[${callUUID}] 🔊 Playing: ${audioUrl}`);
-      await plivoClient.calls.play(callUUID, audioUrl);
+      await plivoClient.calls.playMusic(callUUID, audioUrl);
     } catch (err) {
       logger.error(`[${callUUID}] play error: ${err.message}`);
     } finally {
