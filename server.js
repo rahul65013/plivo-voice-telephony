@@ -218,6 +218,14 @@ wss.on("connection", (ws, req) => {
       case "stop": {
         logger.info(`[WS] STOP — total chunks: ${chunkCount}`);
         stopKeepAlive();
+        // saveOnDrop is a no-op if conv is already DONE (normal flow completed)
+        // handles the case where Plivo ends the call before conversation finished
+        if (conv) {
+          await conv
+            .saveOnDrop()
+            .catch((e) => logger.error(`[WS] saveOnDrop error: ${e.message}`));
+          conv = null;
+        }
         if (session) {
           await session.end();
           session = null;
@@ -233,8 +241,13 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => {
     logger.info(`[WS] Connection closed`);
     stopKeepAlive();
+    // Save lead score + state if call dropped mid-conversation
+    conv
+      ?.saveOnDrop()
+      .catch((e) => logger.error(`[WS] saveOnDrop error: ${e.message}`));
     session?.end().catch(() => {});
     session = null;
+    conv = null;
   });
 
   ws.on("error", (err) => {

@@ -6,9 +6,9 @@
  *  "Hello, this is Aditi from MSN Realty. Is this Mr. [name]?"
  *
  *  STEP: CONFIRM_PERSON
- *    [yes]     → askLanguage       → STEP: ASK_LANGUAGE
- *    [no]      → notAvailable      → done ❌
- *    [unclear] → didNotUnderstand  → re-ask
+ *    [yes]     → askLanguage      → STEP: ASK_LANGUAGE
+ *    [no]      → notAvailable     → done ❌
+ *    [unclear] → didNotUnderstand → re-ask
  *
  *  STEP: ASK_LANGUAGE
  *    [english] → language="en" → askBHK → STEP: ASK_BHK
@@ -16,18 +16,23 @@
  *    [unclear] → re-ask
  *
  *  STEP: ASK_BHK
- *    [4]             → details4BHK   → STEP: ASK_CALLBACK   [Part A - 4BHK]
- *    [5]             → details5BHK   → STEP: ASK_CALLBACK   [Part A - 5BHK]
- *    [negative/none] → branchB_goodbye → done ❌            [Part B] leadScore: Negative
- *    [other 2/3 BHK] → branchC_offer → STEP: ASK_OTHER_BHK [Part C] leadScore: Maybe
+ *    [4]             → details4BHK    → STEP: ASK_CALLBACK   [Part A] leadScore: -
+ *    [5]             → details5BHK    → STEP: ASK_CALLBACK   [Part A] leadScore: -
+ *    [negative/none] → branchB_goodbye → done ❌             [Part B] leadScore: Negative
+ *    [other 2/3 BHK] → branchC_offer  → STEP: ASK_OTHER_BHK [Part C] leadScore: Maybe
  *
  *  STEP: ASK_CALLBACK
- *    [yes] → callbackGoodbye    → done ✅  leadScore: Positive
- *    [no]  → noCallbackGoodbye  → done ✅  leadScore: Maybe
+ *    [yes] → callbackGoodbye   → done ✅  leadScore: Positive
+ *    [no]  → noCallbackGoodbye → done ✅  leadScore: Maybe
  *
  *  STEP: ASK_OTHER_BHK (Part C)
- *    [yes] → callbackGoodbye    → done ✅
- *    [no]  → noCallbackGoodbye  → done ✅
+ *    [yes] → callbackGoodbye   → done ✅  leadScore: Positive
+ *    [no]  → noCallbackGoodbye → done ✅  leadScore: Maybe
+ *
+ *  CALL DROP (at any step):
+ *    CONFIRM_PERSON → leadScore: Negative  (never confirmed identity)
+ *    any other step → leadScore: Maybe     (got past intro but dropped)
+ *    outcome: call_dropped
  */
 
 const logger = require("./logger");
@@ -142,9 +147,7 @@ const AUDIO = {
   },
 };
 
-// ── Question text map — same keys as AUDIO, saved alongside answers in DB ─────
-// These are the exact words the bot speaks at each step.
-// Put in .env so you can update them without touching code.
+// ── Question text — saved to DB alongside each answer ────────────────────────
 const QUESTION_TEXT = {
   CONFIRM_PERSON: process.env.Q_CONFIRM_PERSON || "Is this Mr./Ms. [name]?",
   ASK_LANGUAGE:
@@ -185,17 +188,57 @@ class ConversationManager {
     this.answers = {};
     this.startedAt = Date.now();
     this.turnCount = 0;
-    this.qa = []; // [{ question: "...", answer: "..." }]
+    this.qa = []; // [{ question, answer }]
+    this.logInitialised = false; // guard: prevent duplicate createCallLog
   }
 
-  // Called immediately when WS connects — creates the DB record upfront
+  // ── Called immediately when WS connects ──────────────────────────────────
+  // Creates the DB record upfront so all subsequent updates have a record to update.
+  // Guard ensures it only runs once even if Plivo fires two "start" events.
   async initCallLog() {
+    if (this.logInitialised) return;
+    this.logInitialised = true;
     await createCallLog({
       callUUID: this.callUUID,
       toNumber: this.toNumber,
       startedAt: this.startedAt,
     });
   }
+
+  // ── Called when call drops at any point (WS close / stop event) ──────────
+  // Saves whatever state we have with a sensible lead score based on how far
+  // the conversation got before the drop.
+  //
+  // Lead score on drop:
+  //   CONFIRM_PERSON → Negative  (never even confirmed it was the right person)
+  //   ASK_LANGUAGE   → Maybe     (confirmed person but no language yet)
+  //   ASK_BHK        → Maybe     (confirmed + language set)
+  //   ASK_CALLBACK   → Maybe     (interested in 4/5 BHK but dropped before confirming)
+  //   ASK_OTHER_BHK  → Maybe     (was looking for other BHK)
+  //   DONE           → skip      (already saved properly via normal flow)
+  async saveOnDrop() {
+    if (this.step === STEP.DONE) return; // already finalised — nothing to do
+
+    logger.info(`[${this.callUUID}][Conv] Call dropped at step: ${this.step}`);
+
+    // Assign lead score based on which step they were on when call dropped
+    if (!this.answers.leadScore) {
+      this.answers.leadScore =
+        this.step === STEP.CONFIRM_PERSON
+          ? LEAD_SCORE.NEGATIVE // never confirmed identity
+          : LEAD_SCORE.MAYBE; // got past intro but dropped
+    }
+
+    // Mark as not interested if we never got a BHK answer
+    if (this.answers.interested === undefined) {
+      this.answers.interested = this.step === STEP.ASK_CALLBACK; // true only if they reached callback step
+    }
+
+    this.step = STEP.DONE;
+    await this._save("call_dropped");
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
   audio(key) {
     const url = AUDIO[this.language][key];
@@ -206,13 +249,12 @@ class ConversationManager {
     return url;
   }
 
-  // Save question+answer pair for the current step before transitioning
   _recordQA(answer) {
     const question = QUESTION_TEXT[this.step];
     if (question) {
       this.qa.push({ question, answer });
       logger.info(
-        `[${this.callUUID}][Conv] QA recorded — Q: "${question}" | A: "${answer}"`,
+        `[${this.callUUID}][Conv] QA — Q: "${question}" | A: "${answer}"`,
       );
     }
   }
@@ -235,20 +277,22 @@ class ConversationManager {
     });
   }
 
+  // ── Main entry — called for every transcript ──────────────────────────────
   async handleTranscript(transcript) {
     this.turnCount++;
     logger.info(
       `[${this.callUUID}][Conv] Turn:${this.turnCount} Step:${this.step} | "${transcript}"`,
     );
 
-    // Record QA for current step before any transition
-    this._recordQA(transcript);
+    this._recordQA(transcript); // record Q+A before step transitions
 
     switch (this.step) {
-      // ── "Is this Mr. [name]?" ──────────────────────────────────────────
+      // ── "Is this Mr. [name]?" ───────────────────────────────────────────
       case STEP.CONFIRM_PERSON: {
         if (isNegative(transcript)) {
           logger.info(`[${this.callUUID}][Conv] Wrong person → ending call`);
+          this.answers.interested = false;
+          this.answers.leadScore = LEAD_SCORE.NEGATIVE;
           this.step = STEP.DONE;
           await this._save("wrong_person");
           return { audioUrl: this.audio("notAvailable"), done: true };
@@ -259,12 +303,12 @@ class ConversationManager {
           await this._save();
           return { audioUrl: this.audio("askLanguage"), done: false };
         }
-        // Unclear — re-ask (don't advance step, don't re-record QA)
+        // Unclear — re-ask
         await this._save();
         return { audioUrl: this.audio("didNotUnderstand"), done: false };
       }
 
-      // ── "English or Telugu?" ───────────────────────────────────────────
+      // ── "English or Telugu?" ────────────────────────────────────────────
       case STEP.ASK_LANGUAGE: {
         const detected = detectLanguage(transcript);
         if (!detected) {
@@ -278,7 +322,7 @@ class ConversationManager {
         return { audioUrl: this.audio("askBHK"), done: false };
       }
 
-      // ── "4 or 5 BHK?" ─────────────────────────────────────────────────
+      // ── "4 or 5 BHK?" ───────────────────────────────────────────────────
       case STEP.ASK_BHK: {
         const bhk = detectBHK(transcript);
 
@@ -310,9 +354,10 @@ class ConversationManager {
           return { audioUrl: this.audio("details5BHK"), done: false };
         }
 
-        // Part C — wrong BHK
+        // Part C — wrong BHK (2/3 etc)
         if (bhk === "other") {
           this.answers.bhk = "other";
+          this.answers.interested = false;
           this.answers.leadScore = LEAD_SCORE.MAYBE;
           this.step = STEP.ASK_OTHER_BHK;
           await this._save();
@@ -324,7 +369,7 @@ class ConversationManager {
         return { audioUrl: this.audio("didNotUnderstand"), done: false };
       }
 
-      // ── "Shall I ask Neha to call?" ────────────────────────────────────
+      // ── "Shall I ask Neha to call?" ─────────────────────────────────────
       case STEP.ASK_CALLBACK: {
         if (isNegative(transcript)) {
           this.answers.wantsCallback = false;
@@ -340,10 +385,11 @@ class ConversationManager {
         return { audioUrl: this.audio("callbackGoodbye"), done: true };
       }
 
-      // ── Part C: "Interested in 4 or 5 BHK instead?" ───────────────────
+      // ── Part C: "Interested in 4 or 5 BHK instead?" ────────────────────
       case STEP.ASK_OTHER_BHK: {
         if (isNegative(transcript)) {
           this.answers.wantsCallback = false;
+          this.answers.leadScore = LEAD_SCORE.MAYBE;
           this.step = STEP.DONE;
           await this._save("completed_no_callback");
           return { audioUrl: this.audio("noCallbackGoodbye"), done: true };
