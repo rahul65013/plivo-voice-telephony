@@ -215,14 +215,6 @@ class ConversationManager {
       ? Math.round((endedAt - this.startedAt) / 1000)
       : null;
 
-    if (this.turnCount === 1) {
-      await createCallLog({
-        callUUID: this.callUUID,
-        toNumber: this.toNumber,
-        startedAt: this.startedAt,
-      });
-    }
-
     await updateCallLog({
       callUUID: this.callUUID,
       toNumber: this.toNumber,
@@ -242,6 +234,15 @@ class ConversationManager {
 
     // Record QA for current step before any transition
     this._recordQA(transcript);
+
+    // On turn 1: create the DB record first, then update will work
+    if (this.turnCount === 1) {
+      await createCallLog({
+        callUUID: this.callUUID,
+        toNumber: this.toNumber,
+        startedAt: this.startedAt,
+      });
+    }
 
     switch (this.step) {
       // ── "Is this Mr. [name]?" ──────────────────────────────────────────

@@ -50,8 +50,15 @@ app.get("/health", (_req, res) =>
  * /answer — plays greeting audio (which already includes the language question),
  * then opens the bidirectional stream to receive caller audio.
  */
-app.all("/answer", (_req, res) => {
-  logger.info(`[HTTP] /answer`);
+app.all("/answer", (req, res) => {
+  // Plivo sends To (the number we dialled) in the answer request
+  const toNumber = req.body?.To || req.query?.To || "unknown";
+  const callUUID = req.body?.CallUUID || req.query?.CallUUID || "unknown";
+  logger.info(`[HTTP] /answer — CallUUID: ${callUUID} To: ${toNumber}`);
+
+  // Store toNumber keyed by CallUUID — this is reliable because
+  // Plivo's CallUUID in /answer matches the callId in the WS start event
+  if (callUUID !== "unknown") pendingCalls.set(callUUID, toNumber);
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -167,13 +174,10 @@ wss.on("connection", (ws, req) => {
         callUUID =
           msg.start?.callId || msg.start?.streamSid || `call-${Date.now()}`;
         logger.info(`[WS] START — callUUID: ${callUUID}`);
+        logger.info(`[WS] START full payload: ${JSON.stringify(msg.start)}`);
 
-        // Look up toNumber stored at make-call time
-        // Plivo's requestUuid becomes the callId once the call connects
-        const toNumber =
-          pendingCalls.get(callUUID) ||
-          pendingCalls.get(msg.start?.requestUuid) ||
-          "unknown";
+        // Look up toNumber stored at /answer time (keyed by CallUUID)
+        const toNumber = pendingCalls.get(callUUID) || "unknown";
         pendingCalls.delete(callUUID);
         logger.info(`[WS] toNumber: ${toNumber}`);
 
