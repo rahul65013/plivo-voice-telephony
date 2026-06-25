@@ -65,7 +65,6 @@ app.all("/answer", (req, res) => {
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>${GREETING_AUDIO_URL}</Play>
   <Play>${audioUrl}</Play>
   <Stream
     bidirectional="true"
