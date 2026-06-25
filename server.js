@@ -48,6 +48,10 @@ const plivoClient = new plivo.Client(
   process.env.PLIVO_AUTH_TOKEN,
 );
 
+// Stores toNumber keyed by requestUuid from /make-call
+// so we can look it up when the WS stream connects
+const pendingCalls = new Map(); // requestUuid → toNumber
+
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -138,6 +142,7 @@ app.post("/make-call", async (req, res) => {
       },
     );
     logger.info(`[MAKE_CALL] Success — ${result.requestUuid}`);
+    pendingCalls.set(result.requestUuid, toNumber);
     res.json(result);
   } catch (err) {
     logger.error(`[MAKE_CALL] ${err.message}`);
@@ -216,7 +221,16 @@ wss.on("connection", (ws, req) => {
           msg.start?.callId || msg.start?.streamSid || `call-${Date.now()}`;
         logger.info(`[WS] START — callUUID: ${callUUID}`);
 
-        conv = new ConversationManager(callUUID);
+        // Look up toNumber stored at make-call time
+        // Plivo's requestUuid becomes the callId once the call connects
+        const toNumber =
+          pendingCalls.get(callUUID) ||
+          pendingCalls.get(msg.start?.requestUuid) ||
+          "unknown";
+        pendingCalls.delete(callUUID);
+        logger.info(`[WS] toNumber: ${toNumber}`);
+
+        conv = new ConversationManager(callUUID, toNumber);
         session = new CallSession({
           callUUID,
           sarvamApiKey: process.env.SARVAM_API_KEY,

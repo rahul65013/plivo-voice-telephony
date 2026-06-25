@@ -495,12 +495,17 @@ class ConversationManager {
     const durationSec = isFinal ? Math.round((endedAt - this.startedAt) / 1000) : null;
 
     if (this.turnCount === 1) {
-      await createCallLog({ callUUID: this.callUUID, startedAt: this.startedAt });
+      await createCallLog({
+        callUUID:  this.callUUID,
+        toNumber:  this.toNumber,
+        startedAt: this.startedAt,
+      });
     }
 
     await updateCallLog({
       callUUID: this.callUUID,
-      transcript,
+      toNumber: this.toNumber,
+      qa:       this.qa,          // full question+answer history
       step:     this.step,
       language: this.language,
       answers:  this.answers,
@@ -511,6 +516,12 @@ class ConversationManager {
   async handleTranscript(transcript) {
     this.turnCount++;
     logger.info(`[${this.callUUID}][Conv] Turn:${this.turnCount} Step:${this.step} | "${transcript}"`);
+
+    // Record question+answer for this turn BEFORE step transitions
+    this.qa.push({
+      question: this._questionText(this.step),
+      answer:   transcript,
+    });
 
     switch (this.step) {
 
