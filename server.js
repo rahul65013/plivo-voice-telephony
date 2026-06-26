@@ -56,10 +56,11 @@ app.all("/answer", (req, res) => {
   const callUUID = req.body?.CallUUID || req.query?.CallUUID || "unknown";
   logger.info(`[HTTP] /answer — CallUUID: ${callUUID} To: ${toNumber}`);
 
+  // const phoneNumber = toNumber.replace(/^\+91/, "");
+  // const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/tts-audio/${phoneNumber}.wav`;
 
-  const phoneNumber = toNumber.replace(/^\+91/, "");
-  const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/tts-audio/${phoneNumber}.wav`;
-
+  const audioUrl = req.query.audioUrl;
+  console.log("audioUrl", audioUrl);
   // Store toNumber keyed by CallUUID — this is reliable because
   // Plivo's CallUUID in /answer matches the callId in the WS start event
   if (callUUID !== "unknown") pendingCalls.set(callUUID, toNumber);
@@ -119,7 +120,6 @@ app.post("/hangup", async (req, res) => {
     res.sendStatus(500);
   }
 });
-
 
 app.post("/make-call", async (req, res) => {
   const { toNumber } = req.body;
