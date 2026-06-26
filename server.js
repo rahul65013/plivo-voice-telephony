@@ -56,7 +56,7 @@ app.all("/answer", (req, res) => {
   const callUUID = req.body?.CallUUID || req.query?.CallUUID || "unknown";
   logger.info(`[HTTP] /answer — CallUUID: ${callUUID} To: ${toNumber}`);
 
-  const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/${toNumber}`;
+  const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/tts-audio/${toNumber}`;
   console.log("audioUrl", audioUrl);
 
   // Store toNumber keyed by CallUUID — this is reliable because
