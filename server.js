@@ -58,7 +58,7 @@ app.all("/answer", (req, res) => {
 
 
   const sanitizedNumber = toNumber.replace(/\D/g, ""); // strip everything except digits
-  const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/tts-audio/+${sanitizedNumber}.wav`;
+  const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/tts-audio/${toNumber}.wav`;
 
   // Store toNumber keyed by CallUUID — this is reliable because
   // Plivo's CallUUID in /answer matches the callId in the WS start event
