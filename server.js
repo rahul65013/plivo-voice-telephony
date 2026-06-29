@@ -418,7 +418,7 @@ app.get("/health", (_req, res) =>
  * /answer — plays greeting audio (which already includes the language question),
  * then opens the bidirectional stream to receive caller audio.
  */
-app.all("/answer", (_req, res) => {
+app.all("/answer", (req, res) => {
   logger.info(`[HTTP] /answer`);
   const toNumber = req.body?.To || req.query?.To || "unknown";
   const callUUID = req.body?.CallUUID || req.query?.CallUUID || "unknown";
