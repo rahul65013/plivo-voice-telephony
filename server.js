@@ -356,8 +356,6 @@
 //   process.exit(0);
 // });
 
-
-
 // /**
 //  * server.js
 //  *
@@ -372,9 +370,7 @@
 //  *   → (TODO) fetch audio URL from your API → play it back
 //  */
 
-
 require("dotenv").config();
-
 
 const http = require("http");
 const WebSocket = require("ws");
@@ -383,7 +379,6 @@ const plivo = require("plivo");
 const CallSession = require("./callSession");
 const ConversationManager = require("./conversationManager");
 const logger = require("./logger");
-
 
 const REQUIRED = [
   "PLIVO_AUTH_ID",
@@ -399,7 +394,6 @@ if (missing.length) {
   process.exit(1);
 }
 
-
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const BASE_URL = process.env.SERVER_BASE_URL.replace(/\/$/, "");
 const LANGUAGE = process.env.SARVAM_LANGUAGE || "en-IN";
@@ -407,22 +401,18 @@ const GREETING_AUDIO_URL = process.env.GREETING_AUDIO_URL; // your wav/mp3 with 
 const WS_STREAM_URL =
   BASE_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/stream";
 
-
 const plivoClient = new plivo.Client(
   process.env.PLIVO_AUTH_ID,
   process.env.PLIVO_AUTH_TOKEN,
 );
 
-
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-
 app.get("/health", (_req, res) =>
   res.json({ status: "ok", uptime: process.uptime().toFixed(0) + "s" }),
 );
-
 
 /**
  * /answer — plays greeting audio (which already includes the language question),
@@ -430,11 +420,17 @@ app.get("/health", (_req, res) =>
  */
 app.all("/answer", (_req, res) => {
   logger.info(`[HTTP] /answer`);
+  const toNumber = req.body?.To || req.query?.To || "unknown";
+  const callUUID = req.body?.CallUUID || req.query?.CallUUID || "unknown";
+  logger.info(`[HTTP] /answer — CallUUID: ${callUUID} To: ${toNumber}`);
+  const audioUrl = req.query.audioUrl;
+  // const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/${fileKey}`;
 
+  if (callUUID !== "unknown") pendingCalls.set(callUUID, toNumber);
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>${GREETING_AUDIO_URL}</Play>
+   <Play>${audioUrl}</Play>
   <Stream
     bidirectional="true"
     keepCallAlive="true"
@@ -443,13 +439,9 @@ app.all("/answer", (_req, res) => {
   </Stream>
 </Response>`;
 
-
   logger.info(`[HTTP] XML:\n${xml}`);
   res.set("Content-Type", "text/xml").send(xml);
 });
-
-
-
 
 const retryableErrors = [
   "Network Congestion From Carrier",
@@ -458,28 +450,19 @@ const retryableErrors = [
   "NORMAL_TEMPORARY_FAILURE",
 ];
 
-
 app.post("/hangup", async (req, res) => {
   try {
     logger.info(`[HANGUP] Payload: ${JSON.stringify(req.body, null, 2)}`);
 
-
     const { CallUUID, From, To, HangupCause } = req.body;
 
-
     logger.info(`[HANGUP] UUID=${CallUUID} Cause=${HangupCause}`);
-
-
-
-
-
 
     if (
       retryableErrors.includes(HangupCause) &&
       From === process.env.PLIVO_FROM_NUMBER
     ) {
       logger.warn(`[HANGUP] Retrying call using secondary number`);
-
 
       await plivoClient.calls.create(
         process.env.PLIVO_SECONDARY_NUMBER,
@@ -492,10 +475,8 @@ app.post("/hangup", async (req, res) => {
         },
       );
 
-
       logger.info(`[HANGUP] Retry initiated from secondary number`);
     }
-
 
     res.sendStatus(200);
   } catch (err) {
@@ -504,11 +485,9 @@ app.post("/hangup", async (req, res) => {
   }
 });
 
-
 app.post("/make-call", async (req, res) => {
   const { toNumber } = req.body;
   if (!toNumber) return res.status(400).json({ error: "toNumber required" });
-
 
   try {
     const result = await plivoClient.calls.create(
@@ -529,18 +508,14 @@ app.post("/make-call", async (req, res) => {
   }
 });
 
-
 // ── WebSocket /stream ─────────────────────────────────────────────────────────
 const httpServer = http.createServer(app);
 const wss = new WebSocket.Server({ server: httpServer, path: "/stream" });
 
-
 const MULAW_SILENCE = Buffer.alloc(160, 0xff);
-
 
 wss.on("connection", (ws, req) => {
   logger.info(`[WS] Connected from ${req.socket.remoteAddress}`);
-
 
   let session = null;
   let conv = null;
@@ -548,7 +523,6 @@ wss.on("connection", (ws, req) => {
   let chunkCount = 0;
   let keepAlive = null;
   let isPlayingAudio = false;
-
 
   const startKeepAlive = () => {
     keepAlive = setInterval(() => {
@@ -567,12 +541,10 @@ wss.on("connection", (ws, req) => {
     }, 5000);
   };
 
-
   const stopKeepAlive = () => {
     clearInterval(keepAlive);
     keepAlive = null;
   };
-
 
   const playAudioUrl = async (audioUrl) => {
     if (!audioUrl || !callUUID) return;
@@ -593,7 +565,6 @@ wss.on("connection", (ws, req) => {
     }
   };
 
-
   ws.on("message", async (raw) => {
     let msg;
     try {
@@ -602,13 +573,11 @@ wss.on("connection", (ws, req) => {
       return;
     }
 
-
     switch (msg.event) {
       case "start": {
         callUUID =
           msg.start?.callId || msg.start?.streamSid || `call-${Date.now()}`;
         logger.info(`[WS] START — callUUID: ${callUUID}`);
-
 
         conv = new ConversationManager(callUUID);
         session = new CallSession({
@@ -618,7 +587,6 @@ wss.on("connection", (ws, req) => {
           onTranscriptReady: (transcript) => onTranscript(transcript),
         });
 
-
         await session.start();
         startKeepAlive();
         // No extra audio to play here — greeting + language question
@@ -626,7 +594,6 @@ wss.on("connection", (ws, req) => {
         logger.info(`[WS] Session ready ✅`);
         break;
       }
-
 
       case "media": {
         if (!session || !msg.media?.payload) return;
@@ -636,7 +603,6 @@ wss.on("connection", (ws, req) => {
         session.handleAudioChunk(msg.media.payload);
         break;
       }
-
 
       case "stop": {
         logger.info(`[WS] STOP — total chunks: ${chunkCount}`);
@@ -648,12 +614,10 @@ wss.on("connection", (ws, req) => {
         break;
       }
 
-
       default:
         break; // ignore "incorrectPayload" and other housekeeping events
     }
   });
-
 
   ws.on("close", () => {
     logger.info(`[WS] Connection closed`);
@@ -662,31 +626,25 @@ wss.on("connection", (ws, req) => {
     session = null;
   });
 
-
   ws.on("error", (err) => {
     logger.error(`[WS] Error: ${err.message}`);
     stopKeepAlive();
   });
-
 
   async function onTranscript(transcript) {
     logger.info(`\n${"─".repeat(60)}`);
     logger.info(`[TRANSCRIPT] "${transcript}"`);
     logger.info(`${"─".repeat(60)}\n`);
 
-
     if (!conv) return;
-
 
     try {
       const { audioUrl, done, language } =
         await conv.handleTranscript(transcript);
       if (language) logger.info(`[CONV] Language: ${language}`);
 
-
       if (audioUrl) {
         await playAudioUrl(audioUrl);
-
 
         if (done) {
           // Estimate audio duration from env, default 6s — set GOODBYE_AUDIO_DURATION_MS in .env
@@ -726,7 +684,6 @@ wss.on("connection", (ws, req) => {
   }
 });
 
-
 httpServer.listen(PORT, "0.0.0.0", () => {
   logger.info(`\n🚀 Server running on port ${PORT}`);
   logger.info(`   Answer  : ${BASE_URL}/answer`);
@@ -734,9 +691,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   logger.info(`   Greeting: ${GREETING_AUDIO_URL}`);
 });
 
-
 process.on("SIGINT", () => {
   logger.info(`Shutting down`);
   process.exit(0);
 });
-
