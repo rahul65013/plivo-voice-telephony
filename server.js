@@ -424,6 +424,7 @@ app.all("/answer", (_req, res) => {
   const callUUID = req.body?.CallUUID || req.query?.CallUUID || "unknown";
   logger.info(`[HTTP] /answer — CallUUID: ${callUUID} To: ${toNumber}`);
   const audioUrl = req.query.audioUrl;
+  console.log("audioUrl", audioUrl);
   // const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/${fileKey}`;
 
   if (callUUID !== "unknown") pendingCalls.set(callUUID, toNumber);
