@@ -380,6 +380,7 @@ const CallSession = require("./callSession");
 const ConversationManager = require("./conversationManager");
 const logger = require("./logger");
 const pendingCalls = new Map(); // requestUuid → toNumber
+const pendingAudioUrls = new Map();
 
 const REQUIRED = [
   "PLIVO_AUTH_ID",
@@ -432,7 +433,14 @@ app.all("/answer", (req, res) => {
   console.log("audioUrl", audioUrl);
   // const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/${fileKey}`;
 
-  if (callUUID !== "unknown") pendingCalls.set(callUUID, toNumber);
+  if (callUUID !== "unknown") {
+    pendingCalls.set(callUUID, toNumber);
+
+    if (audioUrl) {
+      pendingAudioUrls.set(callUUID, audioUrl);
+      logger.info(`[HTTP] Saved audioUrl for ${callUUID}`);
+    }
+  }
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -461,6 +469,9 @@ app.post("/hangup", async (req, res) => {
     logger.info(`[HANGUP] Payload: ${JSON.stringify(req.body, null, 2)}`);
 
     const { CallUUID, From, To, HangupCause } = req.body;
+    const audioUrl = pendingAudioUrls.get(CallUUID);
+
+    logger.info(`[HANGUP] audioUrl = ${audioUrl}`);
 
     logger.info(`[HANGUP] UUID=${CallUUID} Cause=${HangupCause}`);
 
@@ -473,13 +484,14 @@ app.post("/hangup", async (req, res) => {
       await plivoClient.calls.create(
         process.env.PLIVO_SECONDARY_NUMBER,
         To,
-        `${BASE_URL}/answer`,
+        `${BASE_URL}/answer?audioUrl=${encodeURIComponent(audioUrl)}`,
         {
           answerMethod: "POST",
           hangupUrl: `${BASE_URL}/hangup`,
           hangupMethod: "POST",
         },
       );
+      pendingAudioUrls.delete(CallUUID);
 
       logger.info(`[HANGUP] Retry initiated from secondary number`);
     }
