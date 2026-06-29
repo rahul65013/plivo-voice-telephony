@@ -425,6 +425,10 @@ app.all("/answer", (req, res) => {
   const callUUID = req.body?.CallUUID || req.query?.CallUUID || "unknown";
   logger.info(`[HTTP] /answer — CallUUID: ${callUUID} To: ${toNumber}`);
   const audioUrl = req.query.audioUrl;
+
+  console.log("Original URL:", req.originalUrl);
+  console.log("Query:", req.query);
+  console.log("Body:", req.body);
   console.log("audioUrl", audioUrl);
   // const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/${fileKey}`;
 
