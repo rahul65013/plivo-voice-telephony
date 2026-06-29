@@ -469,7 +469,9 @@ app.post("/hangup", async (req, res) => {
     logger.info(`[HANGUP] Payload: ${JSON.stringify(req.body, null, 2)}`);
 
     const { CallUUID, From, To, HangupCause } = req.body;
-    const audioUrl = pendingAudioUrls.get(CallUUID);
+    const audioUrl =
+      pendingAudioUrls.get(CallUUID) ||
+      pendingAudioUrls.get(req.body.RequestUUID);
 
     logger.info(`[HANGUP] audioUrl = ${audioUrl}`);
 
@@ -501,6 +503,18 @@ app.post("/hangup", async (req, res) => {
     logger.error(`[HANGUP] ${err.message}`);
     res.sendStatus(500);
   }
+});
+
+
+
+app.post("/store-audio-url", (req, res) => {
+  const { requestUuid, audioUrl } = req.body;
+
+  pendingAudioUrls.set(requestUuid, audioUrl);
+
+  logger.info(`[STORE] requestUuid=${requestUuid} audioUrl=${audioUrl}`);
+
+  res.sendStatus(200);
 });
 
 app.post("/make-call", async (req, res) => {
