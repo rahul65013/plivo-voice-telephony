@@ -379,6 +379,7 @@ const plivo = require("plivo");
 const CallSession = require("./callSession");
 const ConversationManager = require("./conversationManager");
 const logger = require("./logger");
+const pendingCalls = new Map(); // requestUuid → toNumber
 
 const REQUIRED = [
   "PLIVO_AUTH_ID",
