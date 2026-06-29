@@ -455,6 +455,7 @@ const retryableErrors = [
   "Network Congestion From Carrier",
   "Temporary Failure",
   "No Route To Destination",
+  "NORMAL_TEMPORARY_FAILURE",
 ];
 
 
