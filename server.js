@@ -505,8 +505,6 @@ app.post("/hangup", async (req, res) => {
   }
 });
 
-
-
 app.post("/store-audio-url", (req, res) => {
   const { requestUuid, audioUrl } = req.body;
 
@@ -611,7 +609,16 @@ wss.on("connection", (ws, req) => {
           msg.start?.callId || msg.start?.streamSid || `call-${Date.now()}`;
         logger.info(`[WS] START — callUUID: ${callUUID}`);
 
-        conv = new ConversationManager(callUUID);
+        // ✅ Look up toNumber stored at /answer time (keyed by CallUUID)
+        const toNumber = pendingCalls.get(callUUID) || "unknown";
+        pendingCalls.delete(callUUID);
+        logger.info(`[WS] toNumber resolved: ${toNumber}`);
+
+        conv = new ConversationManager(callUUID, toNumber); // ✅ pass toNumber
+
+        // ✅ Create DB record immediately so all subsequent updates have a row to update
+        await conv.initCallLog();
+
         session = new CallSession({
           callUUID,
           sarvamApiKey: process.env.SARVAM_API_KEY,
