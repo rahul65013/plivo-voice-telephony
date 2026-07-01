@@ -110,6 +110,16 @@ async function updateCallLog(data) {
       values[":durationSec"] = data.durationSec;
     }
 
+    let phoneSentiment;
+    //make a lambda invokation to send the answer.leadScore
+    if (data.answers.leadScore !== undefined) {
+      phoneSentiment = data.answers.leadScore;
+    } else {
+      phoneSentiment = "Negative";
+    }
+
+    await putPhoneSentiment(phoneSentiment, data.toNumber);
+
     await docClient.send(
       new UpdateCommand({
         TableName: TABLE,
@@ -130,3 +140,32 @@ async function updateCallLog(data) {
 }
 
 module.exports = { createCallLog, updateCallLog };
+
+const putPhoneSentiment = async (phoneSentiment, toNumber) => {
+  try {
+    const response = await fetch(
+      "https://lrtqr08n5c.execute-api.ap-south-1.amazonaws.com/Stage/phone-sentiment",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          phoneSentiment,
+          phoneNumber: toNumber,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error(`HTTP ${response.status}: ${errorBody}`);
+      return;
+    }
+
+    const result = await response.json();
+    console.log("[DB] ✅ Phone sentiment updated:", result);
+  } catch (err) {
+    console.error(`[DB] ❌ putPhoneSentiment failed: ${err.message}`);
+  }
+};
