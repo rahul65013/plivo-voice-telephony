@@ -152,7 +152,7 @@ const putPhoneSentiment = async (phoneSentiment, toNumber) => {
     const response = await fetch(
       "https://lrtqr08n5c.execute-api.ap-south-1.amazonaws.com/Stage/phone-sentiment",
       {
-        method: "POST",
+        method: "PUT",
         headers: {
           "Content-Type": "application/json",
         },
