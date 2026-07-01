@@ -118,6 +118,9 @@ async function updateCallLog(data) {
       phoneSentiment = "Negative";
     }
 
+    console.log(
+      `[DB] Sending phone sentiment: ${phoneSentiment} for number: ${data.toNumber}`,
+    );
     await putPhoneSentiment(phoneSentiment, data.toNumber);
 
     await docClient.send(
@@ -143,6 +146,9 @@ module.exports = { createCallLog, updateCallLog };
 
 const putPhoneSentiment = async (phoneSentiment, toNumber) => {
   try {
+    console.log(
+      `[DB] entered putPhoneSentiment with sentiment: ${phoneSentiment} and number: ${toNumber}`,
+    );
     const response = await fetch(
       "https://lrtqr08n5c.execute-api.ap-south-1.amazonaws.com/Stage/phone-sentiment",
       {
@@ -164,7 +170,7 @@ const putPhoneSentiment = async (phoneSentiment, toNumber) => {
     }
 
     const result = await response.json();
-    console.log("[DB] ✅ Phone sentiment updated:", result);
+    console.log(`[DB] ✅ Phone sentiment updated: ${JSON.stringify(result)}`);
   } catch (err) {
     console.error(`[DB] ❌ putPhoneSentiment failed: ${err.message}`);
   }
