@@ -1,30 +1,40 @@
-
-
 /**
  * callSession.js
  * Manages one call: feeds audio to STT, collects transcript segments,
  * fires onTranscriptReady when the user finishes an utterance.
+ *
+ * Also exposes onSpeechStart — fired the instant VAD detects the caller
+ * has started talking (before any transcript text exists). This is what
+ * server.js uses to detect barge-in and interrupt whatever audio is
+ * currently playing on the call.
  */
 
 const SarvamSTT = require("./sarvamSTT");
-const logger    = require("./logger");
+const logger = require("./logger");
 
 const FLUSH_DELAY_MS = 1000; // wait 1s after END_SPEECH before finalising
 
 class CallSession {
-  constructor({ callUUID, sarvamApiKey, language, onTranscriptReady }) {
-    this.callUUID           = callUUID;
-    this.onTranscriptReady  = onTranscriptReady;
-    this.segments           = [];
-    this.isSpeaking         = false;
-    this.flushTimer         = null;
+  constructor({
+    callUUID,
+    sarvamApiKey,
+    language,
+    onTranscriptReady,
+    onSpeechStart,
+  }) {
+    this.callUUID = callUUID;
+    this.onTranscriptReady = onTranscriptReady;
+    this.onSpeechStart = onSpeechStart || (() => {});
+    this.segments = [];
+    this.isSpeaking = false;
+    this.flushTimer = null;
 
     this.stt = new SarvamSTT({
       callUUID,
-      apiKey:       sarvamApiKey,
-      language:     language || "en-IN",
+      apiKey: sarvamApiKey,
+      language: language || "en-IN",
       onTranscript: (text) => this._onSegment(text),
-      onVAD:        (sig)  => this._onVAD(sig),
+      onVAD: (sig) => this._onVAD(sig),
     });
   }
 
@@ -41,6 +51,9 @@ class CallSession {
     if (signal === "START_SPEECH") {
       this.isSpeaking = true;
       this._cancelFlush();
+      // Notify server.js immediately — this is the earliest possible signal
+      // that the caller is talking, used to detect barge-in over playback.
+      this.onSpeechStart();
     } else if (signal === "END_SPEECH") {
       this.isSpeaking = false;
       this._scheduleFlush();
@@ -58,7 +71,10 @@ class CallSession {
   }
 
   _cancelFlush() {
-    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = null; }
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
   }
 
   _finalise() {

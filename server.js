@@ -405,9 +405,10 @@ const WS_STREAM_URL =
   BASE_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/stream";
 
 // Small safety pad added on top of the *real* clip duration, to absorb
-// network jitter / a bit of echo tail on some carrier legs. This is NOT a
-// guess at the clip length — the clip length itself is measured from the
-// actual file, this is just a small buffer around that known number.
+// network jitter on some carrier legs. This is NOT a guess at the clip
+// length — the clip length itself is measured from the actual file, this
+// is just a small buffer around that known number. If the caller barges in,
+// none of this matters — playback is stopped immediately instead.
 const PLAYBACK_SAFETY_PAD_MS = parseInt(
   process.env.PLAYBACK_SAFETY_PAD_MS || "400",
   10,
@@ -417,6 +418,29 @@ const plivoClient = new plivo.Client(
   process.env.PLIVO_AUTH_ID,
   process.env.PLIVO_AUTH_TOKEN,
 );
+
+// ── Stop an in-progress Play via Plivo's REST API directly ───────────────────
+// DELETE /v1/Account/{auth_id}/Call/{call_uuid}/Play/ — stops whatever audio
+// is currently playing on the call. Called via fetch (not the SDK) so we
+// don't depend on guessing a method name that may not exist in your
+// installed plivo-node version.
+async function stopPlayback(callUUID) {
+  const authId = process.env.PLIVO_AUTH_ID;
+  const authToken = process.env.PLIVO_AUTH_TOKEN;
+  const url = `https://api.plivo.com/v1/Account/${authId}/Call/${callUUID}/Play/`;
+  const basicAuth = Buffer.from(`${authId}:${authToken}`).toString("base64");
+
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Basic ${basicAuth}` },
+  });
+
+  // 404 just means nothing was playing anymore (clip already finished) — fine.
+  if (!res.ok && res.status !== 404) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${body}`);
+  }
+}
 
 // ── Audio duration cache ──────────────────────────────────────────────────────
 // Maps audioUrl → duration in ms. Populated once per URL, then reused for
@@ -441,8 +465,6 @@ async function getAudioDurationMs(audioUrl) {
     logger.info(`[AUDIO] Probed duration for ${audioUrl}: ${ms}ms`);
     return ms;
   } catch (err) {
-    // Fallback only kicks in if the file couldn't be probed at all
-    // (e.g. bad URL) — it does NOT silently replace real measurements.
     logger.error(
       `[AUDIO] Duration probe failed for ${audioUrl}: ${err.message} — falling back to 4000ms`,
     );
@@ -615,6 +637,7 @@ wss.on("connection", (ws, req) => {
   let chunkCount = 0;
   let keepAlive = null;
   let isPlayingAudio = false;
+  let playbackResumeTimer = null; // handle to the "resume listening" timeout, so barge-in can cancel it
 
   const startKeepAlive = () => {
     keepAlive = setInterval(() => {
@@ -656,18 +679,44 @@ wss.on("connection", (ws, req) => {
       await plivoClient.calls.playMusic(callUUID, audioUrl);
     } catch (err) {
       logger.error(`[${callUUID}] play error: ${err.message}`);
-      isPlayingAudio = false; // fail-safe — don't get stuck muted if the play call itself failed
+      isPlayingAudio = false; // fail-safe — don't get stuck if the play call itself failed
       return 0;
     }
 
     // Resume listening exactly `durationMs` (the clip's real length) later,
-    // plus a small fixed safety pad for jitter/echo — not a guess at length.
-    setTimeout(() => {
+    // plus a small fixed safety pad — unless barge-in cancels this first.
+    playbackResumeTimer = setTimeout(() => {
+      playbackResumeTimer = null;
       isPlayingAudio = false;
-      logger.info(`[${callUUID}] 🎤 Listening resumed`);
+      logger.info(`[${callUUID}] 🎤 Clip finished naturally`);
     }, durationMs + PLAYBACK_SAFETY_PAD_MS);
 
     return durationMs;
+  };
+
+  // ── Barge-in ─────────────────────────────────────────────────────────────
+  // Fired the instant VAD detects the caller started speaking. If we're
+  // currently playing a clip, stop it immediately on the call and mark
+  // playback as over — the caller's speech is now the answer for whatever
+  // question was playing, and flows through onTranscript exactly like any
+  // other turn once STT finalises it.
+  const handleBargeIn = async () => {
+    if (!isPlayingAudio || !callUUID) return;
+
+    logger.info(`[${callUUID}] 🎤⚡ Barge-in detected — stopping playback`);
+
+    if (playbackResumeTimer) {
+      clearTimeout(playbackResumeTimer);
+      playbackResumeTimer = null;
+    }
+    isPlayingAudio = false;
+
+    try {
+      await stopPlayback(callUUID);
+      logger.info(`[${callUUID}] ⏹️ Playback stopped`);
+    } catch (err) {
+      logger.error(`[${callUUID}] stopPlayback error: ${err.message}`);
+    }
   };
 
   ws.on("message", async (raw) => {
@@ -699,6 +748,7 @@ wss.on("connection", (ws, req) => {
           sarvamApiKey: process.env.SARVAM_API_KEY,
           language: LANGUAGE,
           onTranscriptReady: (transcript) => onTranscript(transcript),
+          onSpeechStart: () => handleBargeIn(),
         });
 
         await session.start();
@@ -712,12 +762,10 @@ wss.on("connection", (ws, req) => {
       case "media": {
         if (!session || !msg.media?.payload) return;
 
-        // 🔇 Don't feed caller audio to STT while our own audio is playing.
-        // isPlayingAudio only flips back to false after the clip's REAL
-        // measured duration has elapsed (see playAudioUrl above) — so this
-        // is driven by the actual file length, not a fixed guess.
-        if (isPlayingAudio) return;
-
+        // STT runs continuously — even while our own audio is playing —
+        // so we can detect barge-in via VAD as early as possible. Plivo's
+        // bidirectional Stream only ever sends the caller's real (inbound)
+        // audio here, never an echo of what we played, so this is safe.
         chunkCount++;
         if (chunkCount === 1) logger.info(`[WS] First audio chunk`);
         if (chunkCount % 500 === 0) logger.info(`[WS] Chunks: ${chunkCount}`);
@@ -769,7 +817,10 @@ wss.on("connection", (ws, req) => {
 
         if (done) {
           // Use the clip's REAL measured duration (+ safety pad) to time the
-          // hangup — no more guessing via GOODBYE_AUDIO_DURATION_MS.
+          // hangup. If the caller barges in on the final goodbye clip too,
+          // handleBargeIn() will have already stopped it and flipped
+          // isPlayingAudio — the hangup still fires on schedule regardless,
+          // which is fine since the call is ending either way.
           const delay = durationMs + PLAYBACK_SAFETY_PAD_MS;
           logger.info(
             `[CONV] done=true — hanging up in ${delay}ms after goodbye audio`,
