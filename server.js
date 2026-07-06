@@ -403,6 +403,14 @@ const GREETING_AUDIO_URL = process.env.GREETING_AUDIO_URL; // your wav/mp3 with 
 const WS_STREAM_URL =
   BASE_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/stream";
 
+// How long (ms) to keep ignoring caller audio after we trigger a playback.
+// Bump this up if your longest audio clip is longer than this value —
+// otherwise we'll start listening again before playback has actually finished.
+const AUDIO_PLAYBACK_BUFFER_MS = parseInt(
+  process.env.AUDIO_PLAYBACK_BUFFER_MS || "3000",
+  10,
+);
+
 const plivoClient = new plivo.Client(
   process.env.PLIVO_AUTH_ID,
   process.env.PLIVO_AUTH_TOKEN,
@@ -585,13 +593,17 @@ wss.on("connection", (ws, req) => {
     isPlayingAudio = true;
     try {
       logger.info(`[${callUUID}] 🔊 Playing: ${audioUrl}`);
-      await plivoClient.calls.playMusic(callUUID, audioUrl); // ← only change
+      await plivoClient.calls.playMusic(callUUID, audioUrl);
     } catch (err) {
       logger.error(`[${callUUID}] play error: ${err.message}`);
     } finally {
+      // Keep ignoring caller audio until playback has had time to actually
+      // finish on the call leg — playMusic() only resolves once Plivo has
+      // *accepted* the command, not once the clip has finished playing.
       setTimeout(() => {
         isPlayingAudio = false;
-      }, 3000);
+        logger.info(`[${callUUID}] 🎤 Listening resumed`);
+      }, AUDIO_PLAYBACK_BUFFER_MS);
     }
   };
 
@@ -636,6 +648,12 @@ wss.on("connection", (ws, req) => {
 
       case "media": {
         if (!session || !msg.media?.payload) return;
+
+        // 🔇 Don't feed caller audio to STT while our own audio is playing.
+        // This disables barge-in / interruption handling — we only start
+        // listening again once playback has finished.
+        if (isPlayingAudio) return;
+
         chunkCount++;
         if (chunkCount === 1) logger.info(`[WS] First audio chunk`);
         if (chunkCount % 500 === 0) logger.info(`[WS] Chunks: ${chunkCount}`);
