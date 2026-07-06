@@ -376,6 +376,7 @@ const http = require("http");
 const WebSocket = require("ws");
 const express = require("express");
 const plivo = require("plivo");
+const mm = require("music-metadata"); // npm install music-metadata
 const CallSession = require("./callSession");
 const ConversationManager = require("./conversationManager");
 const logger = require("./logger");
@@ -403,11 +404,12 @@ const GREETING_AUDIO_URL = process.env.GREETING_AUDIO_URL; // your wav/mp3 with 
 const WS_STREAM_URL =
   BASE_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/stream";
 
-// How long (ms) to keep ignoring caller audio after we trigger a playback.
-// Bump this up if your longest audio clip is longer than this value —
-// otherwise we'll start listening again before playback has actually finished.
-const AUDIO_PLAYBACK_BUFFER_MS = parseInt(
-  process.env.AUDIO_PLAYBACK_BUFFER_MS || "3000",
+// Small safety pad added on top of the *real* clip duration, to absorb
+// network jitter / a bit of echo tail on some carrier legs. This is NOT a
+// guess at the clip length — the clip length itself is measured from the
+// actual file, this is just a small buffer around that known number.
+const PLAYBACK_SAFETY_PAD_MS = parseInt(
+  process.env.PLAYBACK_SAFETY_PAD_MS || "400",
   10,
 );
 
@@ -415,6 +417,59 @@ const plivoClient = new plivo.Client(
   process.env.PLIVO_AUTH_ID,
   process.env.PLIVO_AUTH_TOKEN,
 );
+
+// ── Audio duration cache ──────────────────────────────────────────────────────
+// Maps audioUrl → duration in ms. Populated once per URL, then reused for
+// every subsequent call that plays that same clip — no repeated network work.
+const audioDurationCache = new Map();
+
+async function getAudioDurationMs(audioUrl) {
+  if (!audioUrl) return PLAYBACK_SAFETY_PAD_MS;
+  if (audioDurationCache.has(audioUrl)) return audioDurationCache.get(audioUrl);
+
+  try {
+    const res = await fetch(audioUrl);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const metadata = await mm.parseBuffer(buffer, undefined, {
+      duration: true,
+    });
+    const seconds = metadata.format.duration;
+    if (!seconds) throw new Error("no duration in metadata");
+    const ms = Math.round(seconds * 1000);
+    audioDurationCache.set(audioUrl, ms);
+    logger.info(`[AUDIO] Probed duration for ${audioUrl}: ${ms}ms`);
+    return ms;
+  } catch (err) {
+    // Fallback only kicks in if the file couldn't be probed at all
+    // (e.g. bad URL) — it does NOT silently replace real measurements.
+    logger.error(
+      `[AUDIO] Duration probe failed for ${audioUrl}: ${err.message} — falling back to 4000ms`,
+    );
+    const fallbackMs = 4000;
+    audioDurationCache.set(audioUrl, fallbackMs);
+    return fallbackMs;
+  }
+}
+
+// Prefetch every known clip's duration at startup so there is zero added
+// latency during a live call — by the time a call comes in, the cache is warm.
+async function prefetchAllAudioDurations() {
+  const urls = new Set();
+
+  for (const langMap of Object.values(ConversationManager.AUDIO || {})) {
+    for (const url of Object.values(langMap)) {
+      if (url) urls.add(url);
+    }
+  }
+  if (GREETING_AUDIO_URL) urls.add(GREETING_AUDIO_URL);
+
+  logger.info(
+    `[AUDIO] Prefetching durations for ${urls.size} known clip(s)...`,
+  );
+  await Promise.all([...urls].map((url) => getAudioDurationMs(url)));
+  logger.info(`[AUDIO] Prefetch complete.`);
+}
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -439,7 +494,6 @@ app.all("/answer", (req, res) => {
   console.log("Query:", req.query);
   console.log("Body:", req.body);
   console.log("audioUrl", audioUrl);
-  // const audioUrl = `https://d2mpwaasjbc18b.cloudfront.net/${fileKey}`;
 
   if (callUUID !== "unknown") {
     pendingCalls.set(callUUID, toNumber);
@@ -584,27 +638,36 @@ wss.on("connection", (ws, req) => {
     keepAlive = null;
   };
 
+  // Returns the real (measured) duration of the clip that was played, in ms,
+  // so callers (e.g. the final-hangup timer) can reuse the exact same number
+  // instead of keeping their own separate guess.
   const playAudioUrl = async (audioUrl) => {
-    if (!audioUrl || !callUUID) return;
+    if (!audioUrl || !callUUID) return 0;
     if (isPlayingAudio) {
       logger.warn(`[${callUUID}] Already playing — skipping`);
-      return;
+      return 0;
     }
+
     isPlayingAudio = true;
+    const durationMs = await getAudioDurationMs(audioUrl); // cache hit in the common case — near-instant
+
     try {
-      logger.info(`[${callUUID}] 🔊 Playing: ${audioUrl}`);
+      logger.info(`[${callUUID}] 🔊 Playing (${durationMs}ms): ${audioUrl}`);
       await plivoClient.calls.playMusic(callUUID, audioUrl);
     } catch (err) {
       logger.error(`[${callUUID}] play error: ${err.message}`);
-    } finally {
-      // Keep ignoring caller audio until playback has had time to actually
-      // finish on the call leg — playMusic() only resolves once Plivo has
-      // *accepted* the command, not once the clip has finished playing.
-      setTimeout(() => {
-        isPlayingAudio = false;
-        logger.info(`[${callUUID}] 🎤 Listening resumed`);
-      }, AUDIO_PLAYBACK_BUFFER_MS);
+      isPlayingAudio = false; // fail-safe — don't get stuck muted if the play call itself failed
+      return 0;
     }
+
+    // Resume listening exactly `durationMs` (the clip's real length) later,
+    // plus a small fixed safety pad for jitter/echo — not a guess at length.
+    setTimeout(() => {
+      isPlayingAudio = false;
+      logger.info(`[${callUUID}] 🎤 Listening resumed`);
+    }, durationMs + PLAYBACK_SAFETY_PAD_MS);
+
+    return durationMs;
   };
 
   ws.on("message", async (raw) => {
@@ -650,8 +713,9 @@ wss.on("connection", (ws, req) => {
         if (!session || !msg.media?.payload) return;
 
         // 🔇 Don't feed caller audio to STT while our own audio is playing.
-        // This disables barge-in / interruption handling — we only start
-        // listening again once playback has finished.
+        // isPlayingAudio only flips back to false after the clip's REAL
+        // measured duration has elapsed (see playAudioUrl above) — so this
+        // is driven by the actual file length, not a fixed guess.
         if (isPlayingAudio) return;
 
         chunkCount++;
@@ -701,15 +765,12 @@ wss.on("connection", (ws, req) => {
       if (language) logger.info(`[CONV] Language: ${language}`);
 
       if (audioUrl) {
-        await playAudioUrl(audioUrl);
+        const durationMs = await playAudioUrl(audioUrl);
 
         if (done) {
-          // Estimate audio duration from env, default 6s — set GOODBYE_AUDIO_DURATION_MS in .env
-          // to match the length of your longest goodbye audio file
-          const delay = parseInt(
-            process.env.GOODBYE_AUDIO_DURATION_MS || "9000",
-            10,
-          );
+          // Use the clip's REAL measured duration (+ safety pad) to time the
+          // hangup — no more guessing via GOODBYE_AUDIO_DURATION_MS.
+          const delay = durationMs + PLAYBACK_SAFETY_PAD_MS;
           logger.info(
             `[CONV] done=true — hanging up in ${delay}ms after goodbye audio`,
           );
@@ -741,12 +802,16 @@ wss.on("connection", (ws, req) => {
   }
 });
 
-httpServer.listen(PORT, "0.0.0.0", () => {
-  logger.info(`\n🚀 Server running on port ${PORT}`);
-  logger.info(`   Answer  : ${BASE_URL}/answer`);
-  logger.info(`   Stream  : ${WS_STREAM_URL}`);
-  logger.info(`   Greeting: ${GREETING_AUDIO_URL}`);
-});
+prefetchAllAudioDurations()
+  .catch((err) => logger.error(`[AUDIO] Prefetch failed: ${err.message}`))
+  .finally(() => {
+    httpServer.listen(PORT, "0.0.0.0", () => {
+      logger.info(`\n🚀 Server running on port ${PORT}`);
+      logger.info(`   Answer  : ${BASE_URL}/answer`);
+      logger.info(`   Stream  : ${WS_STREAM_URL}`);
+      logger.info(`   Greeting: ${GREETING_AUDIO_URL}`);
+    });
+  });
 
 process.on("SIGINT", () => {
   logger.info(`Shutting down`);

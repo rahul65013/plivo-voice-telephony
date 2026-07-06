@@ -407,4 +407,9 @@ class ConversationManager {
   }
 }
 
+// Expose the AUDIO url map as a static property so server.js can walk every
+// known clip and prefetch/cache its real duration at startup — this is what
+// lets us know exactly when playback finishes without guessing a fixed delay.
+ConversationManager.AUDIO = AUDIO;
+
 module.exports = ConversationManager;
