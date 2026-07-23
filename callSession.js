@@ -12,7 +12,7 @@
 const SarvamSTT = require("./sarvamSTT");
 const logger = require("./logger");
 
-const FLUSH_DELAY_MS = 1000; // wait 1s after END_SPEECH before finalising
+const FLUSH_DELAY_MS = 400; // wait 1s after END_SPEECH before finalising
 
 class CallSession {
   constructor({

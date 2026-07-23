@@ -196,13 +196,14 @@ class ConversationManager {
   // Creates the DB record upfront so all subsequent updates have a record to update.
   // Guard ensures it only runs once even if Plivo fires two "start" events.
   async initCallLog() {
-    if (this.logInitialised) return;
-    this.logInitialised = true;
-    await createCallLog({
-      callUUID: this.callUUID,
-      toNumber: this.toNumber,
-      startedAt: this.startedAt,
-    });
+    return
+    // if (this.logInitialised) return;
+    // this.logInitialised = true;
+    // await createCallLog({
+    //   callUUID: this.callUUID,
+    //   toNumber: this.toNumber,
+    //   startedAt: this.startedAt,
+    // });
   }
 
   // ── Called when call drops at any point (WS close / stop event) ──────────
@@ -260,21 +261,22 @@ class ConversationManager {
   }
 
   async _save(outcome = null) {
-    const isFinal = outcome !== null;
-    const endedAt = isFinal ? Date.now() : null;
-    const durationSec = isFinal
-      ? Math.round((endedAt - this.startedAt) / 1000)
-      : null;
+    return
+    // const isFinal = outcome !== null;
+    // const endedAt = isFinal ? Date.now() : null;
+    // const durationSec = isFinal
+    //   ? Math.round((endedAt - this.startedAt) / 1000)
+    //   : null;
 
-    await updateCallLog({
-      callUUID: this.callUUID,
-      toNumber: this.toNumber,
-      qa: this.qa,
-      step: this.step,
-      language: this.language,
-      answers: this.answers,
-      ...(isFinal && { outcome, endedAt, durationSec }),
-    });
+    // await updateCallLog({
+    //   callUUID: this.callUUID,
+    //   toNumber: this.toNumber,
+    //   qa: this.qa,
+    //   step: this.step,
+    //   language: this.language,
+    //   answers: this.answers,
+    //   ...(isFinal && { outcome, endedAt, durationSec }),
+    // });
   }
 
   // ── Main entry — called for every transcript ──────────────────────────────
