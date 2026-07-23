@@ -196,7 +196,7 @@ class ConversationManager {
   // Creates the DB record upfront so all subsequent updates have a record to update.
   // Guard ensures it only runs once even if Plivo fires two "start" events.
   async initCallLog() {
-    return
+    return;
     // if (this.logInitialised) return;
     // this.logInitialised = true;
     // await createCallLog({
@@ -261,22 +261,27 @@ class ConversationManager {
   }
 
   async _save(outcome = null) {
-    return
-    // const isFinal = outcome !== null;
-    // const endedAt = isFinal ? Date.now() : null;
-    // const durationSec = isFinal
-    //   ? Math.round((endedAt - this.startedAt) / 1000)
-    //   : null;
+    const isFinal = outcome !== null;
+    const endedAt = isFinal ? Date.now() : null;
+    const durationSec = isFinal
+      ? Math.round((endedAt - this.startedAt) / 1000)
+      : null;
 
-    // await updateCallLog({
-    //   callUUID: this.callUUID,
-    //   toNumber: this.toNumber,
-    //   qa: this.qa,
-    //   step: this.step,
-    //   language: this.language,
-    //   answers: this.answers,
-    //   ...(isFinal && { outcome, endedAt, durationSec }),
-    // });
+    await updateCallLog({
+      callUUID: this.callUUID,
+      toNumber: this.toNumber,
+      qa: this.qa,
+      step: this.step,
+      language: this.language,
+      answers: this.answers,
+      ...(isFinal && { outcome, endedAt, durationSec }),
+    });
+  }
+
+  _saveAsync(outcome = null) {
+    this._save(outcome).catch((err) =>
+      logger.error(`[${this.callUUID}][Conv] save failed: ${err.message}`),
+    );
   }
 
   // ── Main entry — called for every transcript ──────────────────────────────
@@ -296,17 +301,18 @@ class ConversationManager {
           this.answers.interested = false;
           this.answers.leadScore = LEAD_SCORE.NEGATIVE;
           this.step = STEP.DONE;
-          await this._save("wrong_person");
+          // await this._save("wrong_person");
+          this._saveAsync("wrong_person");
           return { audioUrl: this.audio("notAvailable"), done: true };
         }
         if (isPositive(transcript)) {
           logger.info(`[${this.callUUID}][Conv] Confirmed → asking language`);
           this.step = STEP.ASK_LANGUAGE;
-          await this._save();
+          // await this._save();
           return { audioUrl: this.audio("askLanguage"), done: false };
         }
         // Unclear — re-ask
-        await this._save();
+        // await this._save();
         return { audioUrl: this.audio("didNotUnderstand"), done: false };
       }
 
@@ -314,13 +320,13 @@ class ConversationManager {
       case STEP.ASK_LANGUAGE: {
         const detected = detectLanguage(transcript);
         if (!detected) {
-          await this._save();
+          // await this._save();
           return { audioUrl: this.audio("didNotUnderstand"), done: false };
         }
         this.language = detected;
         logger.info(`[${this.callUUID}][Conv] Language → ${detected}`);
         this.step = STEP.ASK_BHK;
-        await this._save();
+        // await this._save();
         return { audioUrl: this.audio("askBHK"), done: false };
       }
 
@@ -334,7 +340,8 @@ class ConversationManager {
           this.answers.interested = false;
           this.answers.leadScore = LEAD_SCORE.NEGATIVE;
           this.step = STEP.DONE;
-          await this._save("not_interested");
+          // await this._save("not_interested");
+          this._saveAsync("not_interested");
           return { audioUrl: this.audio("branchB_goodbye"), done: true };
         }
 
@@ -343,7 +350,7 @@ class ConversationManager {
           this.answers.bhk = "4";
           this.answers.interested = true;
           this.step = STEP.ASK_CALLBACK;
-          await this._save();
+          // await this._save();
           return { audioUrl: this.audio("details4BHK"), done: false };
         }
 
@@ -352,7 +359,7 @@ class ConversationManager {
           this.answers.bhk = "5";
           this.answers.interested = true;
           this.step = STEP.ASK_CALLBACK;
-          await this._save();
+          // await this._save();
           return { audioUrl: this.audio("details5BHK"), done: false };
         }
 
@@ -362,12 +369,12 @@ class ConversationManager {
           this.answers.interested = false;
           this.answers.leadScore = LEAD_SCORE.MAYBE;
           this.step = STEP.ASK_OTHER_BHK;
-          await this._save();
+          // await this._save();
           return { audioUrl: this.audio("branchC_offer"), done: false };
         }
 
         // BHK unclear — re-ask
-        await this._save();
+        // await this._save();
         return { audioUrl: this.audio("didNotUnderstand"), done: false };
       }
 
@@ -377,13 +384,13 @@ class ConversationManager {
           this.answers.wantsCallback = false;
           this.answers.leadScore = LEAD_SCORE.MAYBE;
           this.step = STEP.DONE;
-          await this._save("completed_no_callback");
+          this._saveAsync("completed_no_callback");
           return { audioUrl: this.audio("noCallbackGoodbye"), done: true };
         }
         this.answers.wantsCallback = true;
         this.answers.leadScore = LEAD_SCORE.POSITIVE;
         this.step = STEP.DONE;
-        await this._save("completed_callback");
+        this._saveAsync("completed_callback");
         return { audioUrl: this.audio("callbackGoodbye"), done: true };
       }
 
@@ -393,13 +400,13 @@ class ConversationManager {
           this.answers.wantsCallback = false;
           this.answers.leadScore = LEAD_SCORE.MAYBE;
           this.step = STEP.DONE;
-          await this._save("completed_no_callback");
+          this._saveAsync("completed_no_callback");
           return { audioUrl: this.audio("noCallbackGoodbye"), done: true };
         }
         this.answers.wantsCallback = true;
         this.answers.leadScore = LEAD_SCORE.POSITIVE;
         this.step = STEP.DONE;
-        await this._save("completed_callback");
+        this._saveAsync("completed_callback");
         return { audioUrl: this.audio("callbackGoodbye"), done: true };
       }
 
