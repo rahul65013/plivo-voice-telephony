@@ -94,6 +94,14 @@ async function updateCallLog(data) {
     expParts.push("updatedAt = :updatedAt");
     values[":updatedAt"] = new Date().toISOString();
 
+    expParts.push("startedAt = if_not_exists(startedAt, :startedAt)");
+    values[":startedAt"] = data.startedAt
+      ? data.startedAt.toString()
+      : new Date().toISOString();
+
+    expParts.push("createdAt = if_not_exists(createdAt, :createdAt)");
+    values[":createdAt"] = new Date().toISOString();
+
     // Final turn only
     if (data.outcome) {
       expParts.push("outcome = :outcome");
